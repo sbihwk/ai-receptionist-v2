@@ -365,3 +365,5 @@ curl -X POST http://localhost:3000/sms-incoming \
 - Ensure HTTP Header Auth credentials are set with `Authorization: Bearer <key>` format
 - Check that environment variables are set in n8n settings
 - Verify webhook URL is accessible from the internet
+#   r e d e p l o y   0 5 / 1 9 / 2 0 2 6   1 7 : 5 4 : 3 9  
+ 

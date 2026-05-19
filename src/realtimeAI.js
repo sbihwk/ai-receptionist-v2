@@ -1,4 +1,5 @@
 const WebSocket = require('ws');
+const audioop = require('audioop'); // built-in Node.js module for audio conversion
 require('dotenv').config();
 const callManager = require('./callManager');
 const businessConfig = require('./businessConfig');
@@ -11,8 +12,9 @@ const { handleCancelBooking } = require('./tools/cancelBooking');
 const { handleTransferToHuman } = require('./tools/transferToHuman');
 const { handleSaveLeadIntent } = require('./tools/saveLeadIntent');
 
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const OPENAI_REALTIME_URL = 'wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2025-06-03';
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const GEMINI_MODEL = 'gemini-2.0-flash-live-001';
+const GEMINI_WS_URL = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${GEMINI_API_KEY}`;
 
 const TOOL_HANDLERS = {
   check_calendar: handleCheckCalendar,
@@ -25,130 +27,127 @@ const TOOL_HANDLERS = {
   save_lead_intent: handleSaveLeadIntent
 };
 
-const TOOLS = [
+// Gemini uses different tool format than OpenAI — functionDeclarations inside tools array
+const GEMINI_TOOLS = [
   {
-    type: 'function',
-    name: 'check_calendar',
-    description: 'Check real Google Calendar availability for the correct technician based on service type. Call this BEFORE offering any time slots to the caller.',
-    parameters: {
-      type: 'object',
-      properties: {
-        service_type: { type: 'string', enum: ['hvac', 'plumbing', 'electrical', 'general'] },
-        urgency: { type: 'string', enum: ['emergency', 'today', 'this_week', 'flexible'] },
-        duration_minutes: { type: 'number', description: 'Estimated job duration, default 120' }
+    functionDeclarations: [
+      {
+        name: 'check_calendar',
+        description: 'Check real Google Calendar availability for the correct technician based on service type. Call this BEFORE offering any time slots to the caller.',
+        parameters: {
+          type: 'OBJECT',
+          properties: {
+            service_type: { type: 'STRING', enum: ['hvac', 'plumbing', 'electrical', 'general'] },
+            urgency: { type: 'STRING', enum: ['emergency', 'today', 'this_week', 'flexible'] },
+            duration_minutes: { type: 'NUMBER', description: 'Estimated job duration, default 120' }
+          },
+          required: ['service_type', 'urgency']
+        }
       },
-      required: ['service_type', 'urgency']
-    }
-  },
-  {
-    type: 'function',
-    name: 'save_booking_data',
-    description: 'Save completed booking after verbally confirming all details with caller',
-    parameters: {
-      type: 'object',
-      properties: {
-        full_name: { type: 'string' },
-        callback_phone: { type: 'string' },
-        service_address: { type: 'string' },
-        service_type: { type: 'string', enum: ['hvac', 'plumbing', 'electrical', 'other'] },
-        issue_description: { type: 'string' },
-        urgency_level: { type: 'string', enum: ['emergency', 'today', 'this_week', 'flexible'] },
-        confirmed_slot: { type: 'string', description: 'The exact slot the caller confirmed' },
-        appointment_datetime: { type: 'string', description: 'ISO 8601 datetime if known' },
-        upsell_mentioned: { type: 'boolean' },
-        upsell_interested: { type: 'boolean' },
-        customer_mood: { type: 'string', enum: ['happy', 'neutral', 'frustrated', 'angry'] },
-        how_they_found_us: { type: 'string' },
-        call_notes: { type: 'string' }
+      {
+        name: 'save_booking_data',
+        description: 'Save completed booking after verbally confirming all details with caller',
+        parameters: {
+          type: 'OBJECT',
+          properties: {
+            full_name: { type: 'STRING' },
+            callback_phone: { type: 'STRING' },
+            service_address: { type: 'STRING' },
+            service_type: { type: 'STRING', enum: ['hvac', 'plumbing', 'electrical', 'other'] },
+            issue_description: { type: 'STRING' },
+            urgency_level: { type: 'STRING', enum: ['emergency', 'today', 'this_week', 'flexible'] },
+            confirmed_slot: { type: 'STRING', description: 'The exact slot the caller confirmed' },
+            appointment_datetime: { type: 'STRING', description: 'ISO 8601 datetime if known' },
+            upsell_mentioned: { type: 'BOOLEAN' },
+            upsell_interested: { type: 'BOOLEAN' },
+            customer_mood: { type: 'STRING', enum: ['happy', 'neutral', 'frustrated', 'angry'] },
+            how_they_found_us: { type: 'STRING' },
+            call_notes: { type: 'STRING' }
+          },
+          required: ['full_name', 'callback_phone', 'service_address', 'service_type', 'issue_description', 'urgency_level', 'confirmed_slot']
+        }
       },
-      required: ['full_name', 'callback_phone', 'service_address', 'service_type', 'issue_description', 'urgency_level', 'confirmed_slot']
-    }
-  },
-  {
-    type: 'function',
-    name: 'flag_emergency',
-    description: 'Call IMMEDIATELY when emergency detected. Do not wait to collect full info.',
-    parameters: {
-      type: 'object',
-      properties: {
-        emergency_type: { type: 'string', enum: ['gas_leak', 'flooding', 'burst_pipe', 'no_heat_winter', 'sewage_backup', 'carbon_monoxide', 'electrical_fire', 'no_power', 'other'] },
-        caller_address: { type: 'string' },
-        caller_phone: { type: 'string' },
-        description: { type: 'string' },
-        safety_status: { type: 'string', enum: ['safe', 'unsafe', 'unknown'] }
+      {
+        name: 'flag_emergency',
+        description: 'Call IMMEDIATELY when emergency detected. Do not wait to collect full info.',
+        parameters: {
+          type: 'OBJECT',
+          properties: {
+            emergency_type: { type: 'STRING', enum: ['gas_leak', 'flooding', 'burst_pipe', 'no_heat_winter', 'sewage_backup', 'carbon_monoxide', 'electrical_fire', 'no_power', 'other'] },
+            caller_address: { type: 'STRING' },
+            caller_phone: { type: 'STRING' },
+            description: { type: 'STRING' },
+            safety_status: { type: 'STRING', enum: ['safe', 'unsafe', 'unknown'] }
+          },
+          required: ['emergency_type', 'safety_status']
+        }
       },
-      required: ['emergency_type', 'safety_status']
-    }
-  },
-  {
-    type: 'function',
-    name: 'lookup_customer',
-    description: 'Look up returning customer history by phone number',
-    parameters: {
-      type: 'object',
-      properties: {
-        phone_number: { type: 'string' }
+      {
+        name: 'lookup_customer',
+        description: 'Look up returning customer history by phone number',
+        parameters: {
+          type: 'OBJECT',
+          properties: {
+            phone_number: { type: 'STRING' }
+          },
+          required: ['phone_number']
+        }
       },
-      required: ['phone_number']
-    }
-  },
-  {
-    type: 'function',
-    name: 'reschedule_booking',
-    description: 'Reschedule an existing appointment',
-    parameters: {
-      type: 'object',
-      properties: {
-        caller_phone: { type: 'string' },
-        new_preferred_slot: { type: 'string' },
-        reason: { type: 'string' }
+      {
+        name: 'reschedule_booking',
+        description: 'Reschedule an existing appointment',
+        parameters: {
+          type: 'OBJECT',
+          properties: {
+            caller_phone: { type: 'STRING' },
+            new_preferred_slot: { type: 'STRING' },
+            reason: { type: 'STRING' }
+          },
+          required: ['caller_phone', 'new_preferred_slot']
+        }
       },
-      required: ['caller_phone', 'new_preferred_slot']
-    }
-  },
-  {
-    type: 'function',
-    name: 'cancel_booking',
-    description: 'Cancel an existing appointment',
-    parameters: {
-      type: 'object',
-      properties: {
-        caller_phone: { type: 'string' },
-        reason: { type: 'string' },
-        offer_reschedule: { type: 'boolean' }
+      {
+        name: 'cancel_booking',
+        description: 'Cancel an existing appointment',
+        parameters: {
+          type: 'OBJECT',
+          properties: {
+            caller_phone: { type: 'STRING' },
+            reason: { type: 'STRING' },
+            offer_reschedule: { type: 'BOOLEAN' }
+          },
+          required: ['caller_phone']
+        }
       },
-      required: ['caller_phone']
-    }
-  },
-  {
-    type: 'function',
-    name: 'transfer_to_human',
-    description: 'Transfer call to live person when caller insists or situation requires it',
-    parameters: {
-      type: 'object',
-      properties: {
-        reason: { type: 'string' },
-        urgency: { type: 'string', enum: ['immediate', 'when_available'] },
-        notes: { type: 'string' }
+      {
+        name: 'transfer_to_human',
+        description: 'Transfer call to live person when caller insists or situation requires it',
+        parameters: {
+          type: 'OBJECT',
+          properties: {
+            reason: { type: 'STRING' },
+            urgency: { type: 'STRING', enum: ['immediate', 'when_available'] },
+            notes: { type: 'STRING' }
+          },
+          required: ['reason']
+        }
       },
-      required: ['reason']
-    }
-  },
-  {
-    type: 'function',
-    name: 'save_lead_intent',
-    description: 'Save caller info even if they don\'t book — price inquiries, complaints, hesitant callers',
-    parameters: {
-      type: 'object',
-      properties: {
-        caller_phone: { type: 'string' },
-        caller_name: { type: 'string' },
-        intent: { type: 'string', enum: ['price_inquiry', 'complaint', 'just_browsing', 'follow_up_needed', 'not_ready'] },
-        service_interest: { type: 'string' },
-        notes: { type: 'string' }
-      },
-      required: ['caller_phone', 'intent']
-    }
+      {
+        name: 'save_lead_intent',
+        description: "Save caller info even if they don't book — price inquiries, complaints, hesitant callers",
+        parameters: {
+          type: 'OBJECT',
+          properties: {
+            caller_phone: { type: 'STRING' },
+            caller_name: { type: 'STRING' },
+            intent: { type: 'STRING', enum: ['price_inquiry', 'complaint', 'just_browsing', 'follow_up_needed', 'not_ready'] },
+            service_interest: { type: 'STRING' },
+            notes: { type: 'STRING' }
+          },
+          required: ['caller_phone', 'intent']
+        }
+      }
+    ]
   }
 ];
 
@@ -292,6 +291,31 @@ ENDING EVERY CALL:
 "Thanks so much for calling ${businessConfig.name} — have a wonderful day!"`;
 }
 
+// ─── Audio conversion helpers ────────────────────────────────────────────────
+// Twilio sends G.711 µ-law 8kHz. Gemini needs PCM16 16kHz.
+// Gemini sends PCM16 24kHz back. Twilio needs G.711 µ-law 8kHz.
+
+function ulawToGeminiPCM(ulawB64) {
+  const ulawBuf = Buffer.from(ulawB64, 'base64');
+  // µ-law → PCM16 8kHz
+  const pcm8k = audioop.ulaw2lin(ulawBuf, 2);
+  // 8kHz → 16kHz (Gemini input sample rate)
+  const [pcm16k] = audioop.ratecv(pcm8k, 2, 1, 8000, 16000, null);
+  return pcm16k.toString('base64');
+}
+
+function geminiPCMToUlaw(pcm24kB64) {
+  const pcmBuf = Buffer.from(pcm24kB64, 'base64');
+  // 24kHz → 16kHz → 8kHz (two-step for quality)
+  const [pcm16k] = audioop.ratecv(pcmBuf, 2, 1, 24000, 16000, null);
+  const [pcm8k] = audioop.ratecv(pcm16k, 2, 1, 16000, 8000, null);
+  // PCM16 → µ-law
+  const ulaw = audioop.lin2ulaw(pcm8k, 2);
+  return ulaw.toString('base64');
+}
+
+// ─── Main handler ─────────────────────────────────────────────────────────────
+
 function handleMediaStream(twilioWs, req) {
   let streamSid = null;
   let callSid = null;
@@ -299,10 +323,12 @@ function handleMediaStream(twilioWs, req) {
   let returningCustomer = false;
   let customerName = '';
   let jobCount = 0;
-  let openAiWs = null;
+  let geminiWs = null;
   let audioBufferQueue = [];
-  let isResponseActive = false;
+  let geminiReady = false;
   let greetingSent = false;
+  // Gemini tool call state
+  let pendingToolCall = null;
 
   console.log('[realtimeAI] New media stream connection');
 
@@ -320,17 +346,21 @@ function handleMediaStream(twilioWs, req) {
           jobCount = parseInt(data.start.customParameters?.jobCount || '0', 10);
 
           console.log(`[realtimeAI] Stream started — SID: ${streamSid}, Call: ${callSid}, From: ${callerPhone}`);
-
           callManager.updateCall(callSid, { streamSid });
-
-          connectToOpenAI();
+          connectToGemini();
           break;
 
         case 'media':
-          if (openAiWs && openAiWs.readyState === WebSocket.OPEN) {
-            openAiWs.send(JSON.stringify({
-              type: 'input_audio_buffer.append',
-              audio: data.media.payload
+          if (geminiReady && geminiWs && geminiWs.readyState === WebSocket.OPEN) {
+            // Convert µ-law → PCM16 and send to Gemini
+            const pcmB64 = ulawToGeminiPCM(data.media.payload);
+            geminiWs.send(JSON.stringify({
+              realtimeInput: {
+                audio: {
+                  data: pcmB64,
+                  mimeType: 'audio/pcm;rate=16000'
+                }
+              }
             }));
           } else {
             audioBufferQueue.push(data.media.payload);
@@ -339,8 +369,8 @@ function handleMediaStream(twilioWs, req) {
 
         case 'stop':
           console.log(`[realtimeAI] Stream stopped — SID: ${streamSid}`);
-          if (openAiWs && openAiWs.readyState === WebSocket.OPEN) {
-            openAiWs.close();
+          if (geminiWs && geminiWs.readyState === WebSocket.OPEN) {
+            geminiWs.close();
           }
           break;
 
@@ -354,8 +384,8 @@ function handleMediaStream(twilioWs, req) {
 
   twilioWs.on('close', () => {
     console.log(`[realtimeAI] Twilio WebSocket closed — Call: ${callSid}`);
-    if (openAiWs && openAiWs.readyState === WebSocket.OPEN) {
-      openAiWs.close();
+    if (geminiWs && geminiWs.readyState === WebSocket.OPEN) {
+      geminiWs.close();
     }
   });
 
@@ -363,201 +393,179 @@ function handleMediaStream(twilioWs, req) {
     console.error('[realtimeAI:twilioWsError]', err.message, err);
   });
 
-  function connectToOpenAI() {
-    openAiWs = new WebSocket(OPENAI_REALTIME_URL, {
-      headers: {
-        'Authorization': `Bearer ${OPENAI_API_KEY}`,
-      }
-    });
+  function connectToGemini() {
+    console.log(`[realtimeAI] Connecting to Gemini Live — Call: ${callSid}`);
+    geminiWs = new WebSocket(GEMINI_WS_URL);
 
-    openAiWs.on('open', () => {
-      console.log(`[realtimeAI] Connected to OpenAI Realtime — Call: ${callSid}`);
+    geminiWs.on('open', () => {
+      console.log(`[realtimeAI] Gemini WebSocket open — Call: ${callSid}`);
 
-      // Send session config
-      const sessionUpdate = {
-        type: 'session.update',
-        session: {
-          modalities: ['text', 'audio'],
-          voice: 'shimmer',
-          input_audio_format: 'g711_ulaw',
-          output_audio_format: 'g711_ulaw',
-          input_audio_transcription: { model: 'whisper-1' },
-          turn_detection: {
-            type: 'server_vad',
-            threshold: 0.5,
-            silence_duration_ms: 800,
-            prefix_padding_ms: 300
+      // Step 1: Send setup config as first message
+      const setupMessage = {
+        setup: {
+          model: `models/${GEMINI_MODEL}`,
+          generationConfig: {
+            responseModalities: ['AUDIO'],
+            speechConfig: {
+              voiceConfig: {
+                prebuiltVoiceConfig: {
+                  voiceName: 'Aoede' // Natural female voice, good for receptionist
+                }
+              }
+            }
           },
-          instructions: buildSystemPrompt(),
-          tools: TOOLS,
-          tool_choice: 'auto',
-          temperature: 0.7
+          systemInstruction: {
+            parts: [{ text: buildSystemPrompt() }]
+          },
+          tools: GEMINI_TOOLS
         }
       };
 
-      openAiWs.send(JSON.stringify(sessionUpdate));
-
-      // Flush any queued audio
-      while (audioBufferQueue.length > 0) {
-        const audio = audioBufferQueue.shift();
-        openAiWs.send(JSON.stringify({
-          type: 'input_audio_buffer.append',
-          audio
-        }));
-      }
+      geminiWs.send(JSON.stringify(setupMessage));
+      console.log(`[realtimeAI] Gemini setup message sent — Call: ${callSid}`);
     });
 
-    openAiWs.on('message', (rawMessage) => {
+    geminiWs.on('message', (rawMessage) => {
       try {
         const event = JSON.parse(rawMessage.toString());
-        handleOpenAIEvent(event);
+        handleGeminiEvent(event);
       } catch (err) {
-        console.error('[realtimeAI:openAiMessage]', err.message, err);
+        console.error('[realtimeAI:geminiMessage]', err.message, err);
       }
     });
 
-    openAiWs.on('close', () => {
-      console.log(`[realtimeAI] OpenAI WebSocket closed — Call: ${callSid}`);
+    geminiWs.on('close', () => {
+      console.log(`[realtimeAI] Gemini WebSocket closed — Call: ${callSid}`);
+      geminiReady = false;
     });
 
-    openAiWs.on('error', (err) => {
-      console.error('[realtimeAI:openAiWsError]', err.message, err);
+    geminiWs.on('error', (err) => {
+      console.error('[realtimeAI:geminiWsError]', err.message, err);
     });
   }
 
-  function handleOpenAIEvent(event) {
-    switch (event.type) {
-      case 'session.created':
-        console.log(`[realtimeAI] Session created — Call: ${callSid}`);
-        break;
+  function handleGeminiEvent(event) {
+    // setupComplete — Gemini is ready, flush queued audio and send greeting
+    if (event.setupComplete !== undefined) {
+      console.log(`[realtimeAI] Gemini setup complete — Call: ${callSid}`);
+      geminiReady = true;
 
-      case 'session.updated':
-        console.log(`[realtimeAI] Session updated — Call: ${callSid}`);
-        
-        // Single greeting with 1000ms delay and guard
-        setTimeout(() => {
-          if (!greetingSent && openAiWs.readyState === WebSocket.OPEN) {
-            greetingSent = true;
-            openAiWs.send(JSON.stringify({
-              type: "response.create",
-              response: {
-                modalities: ["audio", "text"],
-                instructions: "Say immediately: Thank you for calling Premier HVAC and Plumbing, this is Alex your 24/7 scheduling assistant. How can I help you today?"
-              }
-            }));
-            console.log('[realtimeAI] Greeting sent');
+      // Flush any buffered audio from Twilio
+      while (audioBufferQueue.length > 0) {
+        const ulawB64 = audioBufferQueue.shift();
+        const pcmB64 = ulawToGeminiPCM(ulawB64);
+        geminiWs.send(JSON.stringify({
+          realtimeInput: {
+            audio: {
+              data: pcmB64,
+              mimeType: 'audio/pcm;rate=16000'
+            }
           }
-        }, 1000);
-        break;
+        }));
+      }
 
-      case 'response.audio.delta':
-        if (event.delta && twilioWs.readyState === WebSocket.OPEN) {
-          twilioWs.send(JSON.stringify({
-            event: 'media',
-            streamSid,
-            media: {
-              payload: event.delta
+      // Send greeting after 1 second
+      setTimeout(() => {
+        if (!greetingSent && geminiWs && geminiWs.readyState === WebSocket.OPEN) {
+          greetingSent = true;
+          geminiWs.send(JSON.stringify({
+            clientContent: {
+              turns: [{
+                role: 'user',
+                parts: [{ text: 'The call just connected. Please greet the caller now.' }]
+              }],
+              turnComplete: true
             }
           }));
+          console.log(`[realtimeAI] Greeting trigger sent — Call: ${callSid}`);
         }
-        break;
+      }, 1000);
 
-      case 'response.audio_transcript.done':
-        if (event.transcript) {
-          callManager.addTranscriptEntry(callSid, 'assistant', event.transcript);
+      return;
+    }
+
+    // serverContent — audio response or transcript from Gemini
+    if (event.serverContent) {
+      const sc = event.serverContent;
+
+      // Audio data — convert PCM24k → µ-law and send to Twilio
+      if (sc.modelTurn && sc.modelTurn.parts) {
+        for (const part of sc.modelTurn.parts) {
+          if (part.inlineData && part.inlineData.mimeType && part.inlineData.mimeType.startsWith('audio/pcm')) {
+            if (twilioWs.readyState === WebSocket.OPEN && streamSid) {
+              const ulawB64 = geminiPCMToUlaw(part.inlineData.data);
+              twilioWs.send(JSON.stringify({
+                event: 'media',
+                streamSid,
+                media: { payload: ulawB64 }
+              }));
+            }
+          }
+
+          // Text transcript from model
+          if (part.text) {
+            callManager.addTranscriptEntry(callSid, 'assistant', part.text);
+          }
         }
-        break;
+      }
 
-      case 'conversation.item.input_audio_transcription.completed':
-        if (event.transcript) {
-          callManager.addTranscriptEntry(callSid, 'user', event.transcript);
+      // User speech transcript
+      if (sc.inputTranscription) {
+        callManager.addTranscriptEntry(callSid, 'user', sc.inputTranscription);
+      }
+
+      // Turn interrupted (user barged in)
+      if (sc.interrupted) {
+        console.log(`[realtimeAI] Turn interrupted by user — Call: ${callSid}`);
+        // Clear Twilio audio buffer
+        if (twilioWs.readyState === WebSocket.OPEN && streamSid) {
+          twilioWs.send(JSON.stringify({ event: 'clear', streamSid }));
         }
-        break;
+      }
 
-      case 'input_audio_buffer.speech_started':
-        handleInterruption();
-        break;
+      return;
+    }
 
-      case 'response.output_item.done':
-        if (event.item && event.item.type === 'function_call') {
-          handleToolCall(event.item);
-        }
-        break;
+    // toolCall — Gemini wants to call one of our tools
+    if (event.toolCall) {
+      const functionCalls = event.toolCall.functionCalls || [];
+      for (const fc of functionCalls) {
+        handleToolCall(fc);
+      }
+      return;
+    }
 
-      case 'response.created':
-        isResponseActive = true;
-        break;
-        
-      case 'response.done':
-        isResponseActive = false;
-        break;
-
-      case 'error':
-        console.error('[realtimeAI:openAiError]', JSON.stringify(event.error));
-        break;
-
-      default:
-        break;
+    // Log anything unexpected for debugging
+    const eventKeys = Object.keys(event);
+    if (eventKeys.length > 0 && !['usageMetadata'].includes(eventKeys[0])) {
+      console.log(`[realtimeAI] Gemini event: ${JSON.stringify(event).substring(0, 200)}`);
     }
   }
 
-
-  function handleInterruption() {
-    // Cancel current response only if one is active
-    if (isResponseActive && openAiWs && openAiWs.readyState === WebSocket.OPEN) {
-      openAiWs.send(JSON.stringify({ type: 'response.cancel' }));
-      isResponseActive = false;
-    }
-
-    // Clear Twilio audio buffer
-    if (twilioWs.readyState === WebSocket.OPEN && streamSid) {
-      twilioWs.send(JSON.stringify({
-        event: 'clear',
-        streamSid
-      }));
-    }
-  }
-
-  async function handleToolCall(item) {
-    const toolName = item.name;
-    const callId = item.call_id;
+  async function handleToolCall(fc) {
+    const toolName = fc.name;
+    const callId = fc.id;
 
     let args = {};
     try {
-      args = JSON.parse(item.arguments || '{}');
+      args = typeof fc.args === 'string' ? JSON.parse(fc.args) : (fc.args || {});
     } catch (parseErr) {
       console.error('[realtimeAI:parseToolArgs]', parseErr.message);
     }
 
     // Inject caller phone if not provided
-    if (!args.caller_phone && callerPhone) {
-      args.caller_phone = callerPhone;
-    }
-    if (!args.callback_phone && callerPhone) {
-      args.callback_phone = callerPhone;
-    }
-    if (!args.phone_number && callerPhone) {
-      args.phone_number = callerPhone;
-    }
+    if (!args.caller_phone && callerPhone) args.caller_phone = callerPhone;
+    if (!args.callback_phone && callerPhone) args.callback_phone = callerPhone;
+    if (!args.phone_number && callerPhone) args.phone_number = callerPhone;
 
     console.log(`[realtimeAI] Tool call: ${toolName} — Args: ${JSON.stringify(args)}`);
 
     let result;
     try {
       const handler = TOOL_HANDLERS[toolName];
-      // Say filler while processing to avoid silence
-      if (openAiWs && openAiWs.readyState === WebSocket.OPEN) {
-        let filler = "Sure, one moment...";
-        if (toolName === "check_calendar") filler = "Let me check our availability for you, one moment...";
-        if (toolName === "save_booking_data") filler = "Perfect, let me get that booked for you right now...";
-        if (toolName === "lookup_customer") filler = "Let me pull up your information...";
-        if (toolName === "flag_emergency") filler = "I am flagging this as an emergency right now...";
-        openAiWs.send(JSON.stringify({ type: "response.create", response: { modalities: ["audio", "text"], instructions: `Say exactly: "${filler}"` } }));
-        await new Promise(r => setTimeout(r, 800));
-      }
       if (!handler) {
         result = JSON.stringify({ error: true, message: `Unknown tool: ${toolName}` });
-      } else if (toolName === "transfer_to_human") {
+      } else if (toolName === 'transfer_to_human') {
         result = await handler(args, callSid);
       } else {
         result = await handler(args);
@@ -567,15 +575,17 @@ function handleMediaStream(twilioWs, req) {
       result = JSON.stringify({ error: true, message: 'Tool execution failed. Please continue the conversation naturally.' });
     }
 
-    // Update call state based on tool
+    // Update call state
     if (toolName === 'save_booking_data') {
-      const parsed = JSON.parse(result);
-      callManager.updateCall(callSid, {
-        bookingMade: parsed.success || false,
-        bookingId: parsed.bookingId || null,
-        calendarEventId: parsed.calendarEventId || null,
-        serviceType: args.service_type
-      });
+      try {
+        const parsed = JSON.parse(result);
+        callManager.updateCall(callSid, {
+          bookingMade: parsed.success || false,
+          bookingId: parsed.bookingId || null,
+          calendarEventId: parsed.calendarEventId || null,
+          serviceType: args.service_type
+        });
+      } catch (_) {}
     } else if (toolName === 'flag_emergency') {
       callManager.updateCall(callSid, {
         emergencyDetected: true,
@@ -583,26 +593,20 @@ function handleMediaStream(twilioWs, req) {
       });
     }
 
-    // Send tool result back to OpenAI
-    if (openAiWs && openAiWs.readyState === WebSocket.OPEN) {
-      openAiWs.send(JSON.stringify({
-        type: 'conversation.item.create',
-        item: {
-          type: 'function_call_output',
-          call_id: callId,
-          output: result
+    // Send tool result back to Gemini
+    if (geminiWs && geminiWs.readyState === WebSocket.OPEN) {
+      geminiWs.send(JSON.stringify({
+        toolResponse: {
+          functionResponses: [{
+            id: callId,
+            name: toolName,
+            response: { output: result }
+          }]
         }
       }));
-
-      // Continue the conversation
-      if (openAiWs && openAiWs.readyState === WebSocket.OPEN) {
-        openAiWs.send(JSON.stringify({
-          type: 'response.create'
-        }));
-      }
+      console.log(`[realtimeAI] Tool result sent for ${toolName} — Call: ${callSid}`);
     }
   }
 }
 
 module.exports = { handleMediaStream };
-

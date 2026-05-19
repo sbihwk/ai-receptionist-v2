@@ -8,10 +8,9 @@ async function sendSms(to, body) {
       console.error('[smsService:sendSms] Missing Twilio credentials');
       return null;
     }
-    
+    const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
     const FROM = process.env.TWILIO_FROM;
-    const message = const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
-  await client.messages.create({
+    const message = await client.messages.create({
       body,
       from: FROM,
       to

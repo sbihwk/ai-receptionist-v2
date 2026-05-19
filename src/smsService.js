@@ -2,12 +2,16 @@ const twilio = require('twilio');
 require('dotenv').config();
 const businessConfig = require('./businessConfig');
 
-const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
-const FROM = process.env.TWILIO_FROM;
-
 async function sendSms(to, body) {
   try {
-    const message = await client.messages.create({
+    if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_AUTH_TOKEN || !process.env.TWILIO_FROM) {
+      console.error('[smsService:sendSms] Missing Twilio credentials');
+      return null;
+    }
+    
+    const FROM = process.env.TWILIO_FROM;
+    const message = const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+  await client.messages.create({
       body,
       from: FROM,
       to
@@ -16,7 +20,7 @@ async function sendSms(to, body) {
     return message;
   } catch (err) {
     console.error('[smsService:sendSms]', err.message, err);
-    throw err;
+    return null;
   }
 }
 

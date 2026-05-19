@@ -2,40 +2,46 @@
 require('dotenv').config();
 const businessConfig = require('./businessConfig');
 
-const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_HOST || 'smtp.gmail.com',
-  port: parseInt(process.env.SMTP_PORT, 10) || 587,
-  secure: false,
-  connectionTimeout: 10000,
-  greetingTimeout: 5000,
-  socketTimeout: 10000,
-  tls: { rejectUnauthorized: false },
-  secure: false,
-  auth: {
-    user: process.env.SMTP_USER,
-    pass: process.env.SMTP_PASS
-  }
-});
+function createTransporter() {
+  return nodemailer.createTransport({
+    host: process.env.SMTP_HOST || 'smtp.gmail.com',
+    port: parseInt(process.env.SMTP_PORT, 10) || 465,
+    secure: true,
+    connectionTimeout: 10000,
+    greetingTimeout: 5000,
+    socketTimeout: 10000,
+    tls: { rejectUnauthorized: false },
+    auth: {
+      user: process.env.SMTP_USER,
+      pass: process.env.SMTP_PASS
+    }
+  });
+}
 
 async function sendEmail(to, subject, html) {
   try {
+    if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
+      console.error('[emailService:sendEmail] Missing SMTP credentials');
+      return null;
+    }
+    const transporter = createTransporter();
     const info = await transporter.sendMail({
       from: `"${businessConfig.name} AI Receptionist" <${process.env.SMTP_USER}>`,
       to,
       subject,
       html
     });
-    console.log(`[emailService:sendEmail] Sent to ${to} â€” ID: ${info.messageId}`);
+    console.log(`[emailService:sendEmail] Sent to ${to} — ID: ${info.messageId}`);
     return info;
   } catch (err) {
     console.error('[emailService:sendEmail]', err.message, err);
-    throw err;
+    return null;
   }
 }
 
 async function sendTechDispatch(techEmail, bookingData) {
   const mapsLink = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(bookingData.service_address || bookingData.address || '')}`;
-  const subject = `ðŸ”§ New Job Dispatch: ${bookingData.service_type} â€” ${bookingData.full_name || bookingData.name}`;
+  const subject = ` New Job Dispatch: ${bookingData.service_type} — ${bookingData.full_name || bookingData.name}`;
   const html = `
     <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
       <div style="background:#1a56db;color:#fff;padding:20px;border-radius:8px 8px 0 0;">

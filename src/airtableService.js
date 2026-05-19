@@ -55,7 +55,7 @@ async function saveLead(data) {
     return result;
   } catch (err) {
     console.error("[airtableService:saveLead]", err.message, err);
-    throw err;
+    return null;
   }
 }
 
@@ -92,7 +92,7 @@ async function saveConversation(callSid, transcript, summary) {
     return result;
   } catch (err) {
     console.error("[airtableService:saveConversation]", err.message, err);
-    throw err;
+    return null;
   }
 }
 
@@ -114,7 +114,7 @@ async function saveAnalytics(data) {
     return result;
   } catch (err) {
     console.error("[airtableService:saveAnalytics]", err.message, err);
-    throw err;
+    return null;
   }
 }
 

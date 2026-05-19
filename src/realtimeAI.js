@@ -367,7 +367,6 @@ function handleMediaStream(twilioWs, req) {
     openAiWs = new WebSocket(OPENAI_REALTIME_URL, {
       headers: {
         'Authorization': `Bearer ${OPENAI_API_KEY}`,
-        'OpenAI-Beta': 'realtime=v1'
       }
     });
 

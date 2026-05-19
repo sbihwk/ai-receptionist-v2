@@ -1,0 +1,2786 @@
+﻿
+========== C:\Users\acer\ai-receptionist-v2\src\airtableService.js ==========
+const axios = require('axios');
+require('dotenv').config();
+
+const BASE_URL = `https://api.airtable.com/v0/${process.env.AIRTABLE_BASE_ID}`;
+const HEADERS = {
+  Authorization: `Bearer ${process.env.AIRTABLE_API_KEY}`,
+  "Content-Type": "application/json"
+};
+
+const TABLES = {
+  leads: "Leads",
+  conversationHistory: "ConversationHistory",
+  analytics: "ConversationAnalytics",
+  businesses: "Businesses",
+  reminders: "Reminders",
+  billing: "BillingTickets"
+};
+
+const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+async function airtableRequest(method, table, data = null, params = {}) {
+  try {
+    const config = { method, url: `${BASE_URL}/${encodeURIComponent(table)}`, headers: HEADERS, params };
+    if (data) config.data = data;
+    const response = await axios(config);
+    await delay(200);
+    return response.data;
+  } catch (err) {
+    console.error("[airtableService:airtableRequest]", err.message, err.response?.data);
+    throw err;
+  }
+}
+
+async function saveLead(data) {
+  try {
+    const fields = {
+      customer_name: data.full_name || data.caller_name || "",
+      phone: data.callback_phone || data.caller_phone || "",
+      address: data.service_address || "",
+      service_type: data.service_type || "",
+      issue: data.issue_description || "",
+      urgency: data.urgency_level || "flexible",
+      booking_status: data.status || "BOOKED",
+      businessId: data.businessId || "default",
+      conversationId: data.conversationId || "",
+      lead_score: data.lead_score || "",
+      ReviewRequestSent: false,
+      FollowUp30DaySent: false,
+      Reminder24hSent: false,
+      Reminder1hSent: false,
+      timestamp: data.appointment_datetime || new Date().toISOString()
+    };
+    const result = await airtableRequest("post", TABLES.leads, { fields });
+    console.log("[airtable] Lead saved successfully");
+    return result;
+  } catch (err) {
+    console.error("[airtableService:saveLead]", err.message, err);
+    throw err;
+  }
+}
+
+async function updateLead(recordId, updates) {
+  try {
+    return await airtableRequest("patch", TABLES.leads, { fields: updates }, {});
+  } catch (err) {
+    console.error("[airtableService:updateLead]", err.message, err);
+    throw err;
+  }
+}
+
+async function updateLeadById(recordId, updates) {
+  try {
+    const config = { method: "patch", url: `${BASE_URL}/${encodeURIComponent(TABLES.leads)}/${recordId}`, headers: HEADERS, data: { fields: updates } };
+    const response = await axios(config);
+    await delay(200);
+    return response.data;
+  } catch (err) {
+    console.error("[airtableService:updateLeadById]", err.message, err);
+    throw err;
+  }
+}
+
+async function saveConversation(callSid, transcript, summary) {
+  try {
+    const fields = {
+      CallSid: callSid,
+      Transcript: typeof transcript === "string" ? transcript : JSON.stringify(transcript),
+      Summary: summary || ""
+    };
+    const result = await airtableRequest("post", TABLES.conversationHistory, { fields });
+    console.log("[airtable] Conversation saved successfully");
+    return result;
+  } catch (err) {
+    console.error("[airtableService:saveConversation]", err.message, err);
+    throw err;
+  }
+}
+
+async function saveAnalytics(data) {
+  try {
+    const fields = {
+      CallSid: data.callSid || "",
+      BookingMade: data.bookingMade || false,
+      EmergencyDetected: data.emergencyDetected || false,
+      revenue_opportunity: String(data.revenueOpportunity || "0"),
+      detected_issue: data.serviceType || "",
+      call_summary: data.callSummary || "",
+      recommended_followup: data.recommendedFollowup || "",
+      IssueCategory: data.callClassification || "",
+      timestamp: new Date().toISOString()
+    };
+    const result = await airtableRequest("post", TABLES.analytics, { fields });
+    console.log("[airtable] Analytics saved successfully");
+    return result;
+  } catch (err) {
+    console.error("[airtableService:saveAnalytics]", err.message, err);
+    throw err;
+  }
+}
+
+async function lookupByPhone(phone) {
+  try {
+    const cleanPhone = phone.replace(/[^\d+]/g, "");
+    const filterFormula = `OR({phone}="${cleanPhone}", {phone}="${phone}")`;
+    const result = await airtableRequest("get", TABLES.leads, null, { filterByFormula: filterFormula, sort: [{ field: "timestamp", direction: "desc" }], maxRecords: 10 });
+    if (!result.records || result.records.length === 0) return { found: false };
+    const records = result.records;
+    const latest = records[0].fields;
+    const bookedRecords = records.filter(r => r.fields.booking_status === "BOOKED" || r.fields.booking_status === "COMPLETED");
+    return { found: true, recordId: records[0].id, name: latest.customer_name || "", lastServiceDate: latest.timestamp || "", lastServiceType: latest.service_type || "", totalJobs: bookedRecords.length, lifetimeValue: bookedRecords.length * (parseInt(process.env.AVERAGE_TICKET_VALUE, 10) || 450), allRecords: records };
+  } catch (err) {
+    console.error("[airtableService:lookupByPhone]", err.message, err);
+    return { found: false };
+  }
+}
+
+async function getLeadsNeedingReminder24h() {
+  try {
+    const now = new Date();
+    const in24h = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+    const in26h = new Date(now.getTime() + 26 * 60 * 60 * 1000);
+    const filterFormula = `AND({Reminder24hSent}=FALSE(),{booking_status}="BOOKED",{timestamp}!="",IS_AFTER({timestamp},"${in24h.toISOString()}"),IS_BEFORE({timestamp},"${in26h.toISOString()}"))`;
+    const result = await airtableRequest("get", TABLES.leads, null, { filterByFormula: filterFormula, maxRecords: 50 });
+    return result.records || [];
+  } catch (err) { return []; }
+}
+
+async function getLeadsNeedingReminder1h() {
+  try {
+    const now = new Date();
+    const in1h = new Date(now.getTime() + 60 * 60 * 1000);
+    const in1_5h = new Date(now.getTime() + 90 * 60 * 1000);
+    const filterFormula = `AND({Reminder1hSent}=FALSE(),{booking_status}="BOOKED",{timestamp}!="",IS_AFTER({timestamp},"${in1h.toISOString()}"),IS_BEFORE({timestamp},"${in1_5h.toISOString()}"))`;
+    const result = await airtableRequest("get", TABLES.leads, null, { filterByFormula: filterFormula, maxRecords: 50 });
+    return result.records || [];
+  } catch (err) { return []; }
+}
+
+async function markReminderSent(recordId, type) {
+  try {
+    const updates = {};
+    if (type === "24h") updates.Reminder24hSent = true;
+    if (type === "1h") updates.Reminder1hSent = true;
+    if (type === "review") updates.ReviewRequestSent = true;
+    if (type === "followup30") updates.FollowUp30DaySent = true;
+    return await updateLeadById(recordId, updates);
+  } catch (err) { throw err; }
+}
+
+async function getTodayStats() {
+  try {
+    const today = new Date();
+    const startOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate()).toISOString();
+    const analyticsResult = await airtableRequest("get", TABLES.analytics, null, { filterByFormula: `IS_AFTER({timestamp},"${startOfDay}")`, maxRecords: 500 });
+    const records = analyticsResult.records || [];
+    return { totalCalls: records.length, bookingsMade: records.filter(r => r.fields.BookingMade).length, emergencies: records.filter(r => r.fields.EmergencyDetected).length, estimatedRevenue: records.filter(r => r.fields.BookingMade).length * (parseInt(process.env.AVERAGE_TICKET_VALUE, 10) || 450), date: today.toLocaleDateString("en-US", { timeZone: process.env.TIME_ZONE || "America/Chicago" }) };
+  } catch (err) { return { totalCalls: 0, bookingsMade: 0, emergencies: 0, estimatedRevenue: 0, date: new Date().toLocaleDateString() }; }
+}
+
+async function getLeadsNeedingReview() {
+  try {
+    const fourHoursAgo = new Date(Date.now() - 4 * 60 * 60 * 1000);
+    const filterFormula = `AND({ReviewRequestSent}=FALSE(),{booking_status}="BOOKED",{timestamp}!="",IS_BEFORE({timestamp},"${fourHoursAgo.toISOString()}"))`;
+    const result = await airtableRequest("get", TABLES.leads, null, { filterByFormula: filterFormula, maxRecords: 50 });
+    return result.records || [];
+  } catch (err) { return []; }
+}
+
+async function getLeadsNeedingFollowUp30() {
+  try {
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    const thirtyOneDaysAgo = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000);
+    const filterFormula = `AND({FollowUp30DaySent}=FALSE(),{booking_status}="BOOKED",{timestamp}!="",IS_BEFORE({timestamp},"${thirtyDaysAgo.toISOString()}"),IS_AFTER({timestamp},"${thirtyOneDaysAgo.toISOString()}"))`;
+    const result = await airtableRequest("get", TABLES.leads, null, { filterByFormula: filterFormula, maxRecords: 50 });
+    return result.records || [];
+  } catch (err) { return []; }
+}
+
+async function findBookingByPhone(phone) {
+  try {
+    const cleanPhone = phone.replace(/[^\d+]/g, "");
+    const filterFormula = `AND(OR({phone}="${cleanPhone}",{phone}="${phone}"),{booking_status}="BOOKED")`;
+    const result = await airtableRequest("get", TABLES.leads, null, { filterByFormula: filterFormula, sort: [{ field: "timestamp", direction: "desc" }], maxRecords: 1 });
+    if (result.records && result.records.length > 0) return { found: true, record: result.records[0] };
+    return { found: false };
+  } catch (err) { return { found: false }; }
+}
+
+module.exports = { saveLead, updateLead, updateLeadById, saveConversation, saveAnalytics, lookupByPhone, getLeadsNeedingReminder24h, getLeadsNeedingReminder1h, markReminderSent, getTodayStats, getLeadsNeedingReview, getLeadsNeedingFollowUp30, findBookingByPhone };
+
+========== C:\Users\acer\ai-receptionist-v2\src\businessConfig.js ==========
+require('dotenv').config();
+
+const businessConfig = {
+  name: process.env.BUSINESS_NAME || 'Premier HVAC & Plumbing',
+  phone: process.env.BUSINESS_PHONE || '+1000000000',
+  email: process.env.BUSINESS_EMAIL || 'info@business.com',
+  ownerEmail: process.env.OWNER_EMAIL || 'owner@business.com',
+  managerEmail: process.env.MANAGER_EMAIL || 'manager@business.com',
+  ownerPhone: process.env.OWNER_PHONE || '+1000000000',
+  emergencySmsTo: process.env.EMERGENCY_SMS_TO || process.env.OWNER_PHONE || '+1000000000',
+  onCallTechPhone: process.env.ON_CALL_TECH_PHONE || '+1000000000',
+  averageTicketValue: parseInt(process.env.AVERAGE_TICKET_VALUE, 10) || 450,
+
+  dispatchFee: process.env.DISPATCH_FEE || '$89',
+  hours: process.env.BUSINESS_HOURS || 'Monday-Friday 8am-6pm, Saturday 9am-2pm',
+  serviceAreas: process.env.SERVICE_AREAS || 'Your City and surrounding areas',
+  timeZone: process.env.TIME_ZONE || 'America/Chicago',
+
+  googleReviewLink: process.env.GOOGLE_REVIEW_LINK || 'https://g.page/r/YOUR_REVIEW_LINK',
+
+  techEmails: {
+    hvac: process.env.HVAC_TECH_EMAIL || 'hvac@business.com',
+    plumbing: process.env.PLUMBING_TECH_EMAIL || 'plumbing@business.com',
+    electrical: process.env.ELECTRICAL_TECH_EMAIL || 'electrical@business.com',
+    general: process.env.GENERAL_TECH_EMAIL || 'general@business.com',
+    other: process.env.GENERAL_TECH_EMAIL || 'general@business.com'
+  },
+
+  calendarIds: {
+    hvac: process.env.HVAC_CALENDAR_ID || 'primary',
+    plumbing: process.env.PLUMBING_CALENDAR_ID || 'primary',
+    electrical: process.env.ELECTRICAL_CALENDAR_ID || 'primary',
+    general: process.env.DEFAULT_CALENDAR_ID || 'primary',
+    other: process.env.DEFAULT_CALENDAR_ID || 'primary'
+  },
+
+  businessHoursParsed: parseBusinessHours(process.env.BUSINESS_HOURS || 'Monday-Friday 8am-6pm, Saturday 9am-2pm'),
+
+  sunClosed: true
+};
+
+function parseBusinessHours(hoursStr) {
+  const schedule = {
+    0: null, // Sunday
+    1: { open: 8, close: 18 },
+    2: { open: 8, close: 18 },
+    3: { open: 8, close: 18 },
+    4: { open: 8, close: 18 },
+    5: { open: 8, close: 18 },
+    6: { open: 9, close: 14 } // Saturday
+  };
+
+  try {
+    const parts = hoursStr.split(',').map(s => s.trim());
+    for (const part of parts) {
+      const match = part.match(/(\w[\w\s-]*?)\s+(\d{1,2})(am|pm)\s*-\s*(\d{1,2})(am|pm)/i);
+      if (!match) continue;
+
+      const dayRange = match[1].trim();
+      let openHour = parseInt(match[2], 10);
+      const openAmPm = match[3].toLowerCase();
+      let closeHour = parseInt(match[4], 10);
+      const closeAmPm = match[5].toLowerCase();
+
+      if (openAmPm === 'pm' && openHour !== 12) openHour += 12;
+      if (openAmPm === 'am' && openHour === 12) openHour = 0;
+      if (closeAmPm === 'pm' && closeHour !== 12) closeHour += 12;
+      if (closeAmPm === 'am' && closeHour === 12) closeHour = 0;
+
+      const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+
+      if (dayRange.includes('-')) {
+        const [startDay, endDay] = dayRange.split('-').map(d => d.trim().toLowerCase());
+        const startIdx = dayNames.indexOf(startDay);
+        const endIdx = dayNames.indexOf(endDay);
+        if (startIdx >= 0 && endIdx >= 0) {
+          for (let i = startIdx; i <= endIdx; i++) {
+            schedule[i] = { open: openHour, close: closeHour };
+          }
+        }
+      } else {
+        const idx = dayNames.indexOf(dayRange.toLowerCase());
+        if (idx >= 0) {
+          schedule[idx] = { open: openHour, close: closeHour };
+        }
+      }
+    }
+  } catch (err) {
+    console.error('[businessConfig:parseBusinessHours]', err.message, err);
+  }
+
+  return schedule;
+}
+
+function isWithinBusinessHours() {
+  const now = new Date();
+  const options = { timeZone: businessConfig.timeZone };
+  const localStr = now.toLocaleString('en-US', options);
+  const local = new Date(localStr);
+  const day = local.getDay();
+  const hour = local.getHours();
+  const minutes = local.getMinutes();
+  const currentTime = hour + minutes / 60;
+
+  const todayHours = businessConfig.businessHoursParsed[day];
+  if (!todayHours) return false;
+  return currentTime >= todayHours.open && currentTime < todayHours.close;
+}
+
+businessConfig.isWithinBusinessHours = isWithinBusinessHours;
+
+module.exports = businessConfig;
+
+========== C:\Users\acer\ai-receptionist-v2\src\calendarService.js ==========
+const { google } = require('googleapis');
+const path = require('path');
+
+function getAuth() {
+  try {
+    const keyFile = path.join(__dirname, '..', 'service-account.json');
+    const fs = require('fs');
+    if (fs.existsSync(keyFile)) {
+      const creds = JSON.parse(fs.readFileSync(keyFile, 'utf8'));
+      return new google.auth.GoogleAuth({
+        credentials: creds,
+        scopes: ['https://www.googleapis.com/auth/calendar']
+      });
+    }
+    if (process.env.GOOGLE_SERVICE_ACCOUNT_JSON) {
+      const creds = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
+      return new google.auth.GoogleAuth({
+        credentials: creds,
+        scopes: ['https://www.googleapis.com/auth/calendar']
+      });
+    }
+    throw new Error('No service account credentials found');
+  } catch (err) {
+    console.error('[calendarService] Auth init error:', err.message);
+    throw err;
+  }
+}
+
+async function createEvent({ summary, description, startTime, endTime, calendarId = 'sagargoyat2007@gmail.com' }) {
+  try {
+    const auth = getAuth();
+    const calendar = google.calendar({ version: 'v3', auth });
+    const event = await calendar.events.insert({
+      calendarId,
+      resource: {
+        summary,
+        description,
+        start: { dateTime: startTime },
+        end: { dateTime: endTime }
+      }
+    });
+    console.log('[calendarService:createEvent] Created event:', event.data.id);
+    return event.data;
+  } catch (err) {
+    console.error('[calendarService:createEvent]', err.message);
+    throw err;
+  }
+}
+
+async function getAvailableSlots({ date, calendarId = 'sagargoyat2007@gmail.com' }) {
+  try {
+    const auth = getAuth();
+    const calendar = google.calendar({ version: 'v3', auth });
+    const targetDate = date ? new Date(date) : new Date();
+    const startOfDay = new Date(targetDate);
+    startOfDay.setHours(8, 0, 0, 0);
+    const endOfDay = new Date(targetDate);
+    endOfDay.setHours(18, 0, 0, 0);
+    const response = await calendar.events.list({
+      calendarId,
+      timeMin: startOfDay.toISOString(),
+      timeMax: endOfDay.toISOString(),
+      singleEvents: true,
+      orderBy: 'startTime'
+    });
+    const busySlots = (response.data.items || []).map(e => ({
+      start: new Date(e.start.dateTime || e.start.date),
+      end: new Date(e.end.dateTime || e.end.date)
+    }));
+    const slots = [];
+    for (let hour = 8; hour < 17; hour++) {
+      const slotStart = new Date(targetDate);
+      slotStart.setHours(hour, 0, 0, 0);
+      const slotEnd = new Date(targetDate);
+      slotEnd.setHours(hour + 1, 0, 0, 0);
+      const busy = busySlots.some(b => slotStart < b.end && slotEnd > b.start);
+      if (!busy) slots.push({ start: slotStart.toISOString(), end: slotEnd.toISOString(), label: `${hour > 12 ? hour - 12 : hour}:00 ${hour >= 12 ? 'PM' : 'AM'}` });
+    }
+    return slots;
+  } catch (err) {
+    console.error('[calendarService:getAvailableSlots]', err.message);
+    throw err;
+  }
+}
+
+module.exports = { createEvent, getAvailableSlots };
+
+========== C:\Users\acer\ai-receptionist-v2\src\callManager.js ==========
+const activeCalls = new Map();
+
+function initCall(callSid, data = {}) {
+  const callState = {
+    callSid,
+    from: data.from || '',
+    to: data.to || '',
+    startTime: new Date().toISOString(),
+    endTime: null,
+    streamSid: null,
+    returningCustomer: data.returningCustomer || false,
+    customerName: data.customerName || '',
+    jobCount: data.jobCount || 0,
+    transcript: [],
+    bookingMade: false,
+    bookingId: null,
+    emergencyDetected: false,
+    transferRequested: false,
+    upsellMentioned: false,
+    upsellInterested: false,
+    callClassification: null,
+    customerMood: 'neutral',
+    serviceType: null,
+    calendarEventId: null,
+    appointmentDatetime: null
+  };
+  activeCalls.set(callSid, callState);
+  return callState;
+}
+
+function getCall(callSid) {
+  return activeCalls.get(callSid) || null;
+}
+
+function updateCall(callSid, updates) {
+  const call = activeCalls.get(callSid);
+  if (!call) return null;
+  Object.assign(call, updates);
+  return call;
+}
+
+function addTranscriptEntry(callSid, role, text) {
+  const call = activeCalls.get(callSid);
+  if (!call) return;
+  call.transcript.push({
+    role,
+    text,
+    timestamp: new Date().toISOString()
+  });
+}
+
+function endCall(callSid) {
+  const call = activeCalls.get(callSid);
+  if (!call) return null;
+  call.endTime = new Date().toISOString();
+  return call;
+}
+
+function removeCall(callSid) {
+  const call = activeCalls.get(callSid);
+  activeCalls.delete(callSid);
+  return call;
+}
+
+function getActiveCalls() {
+  return activeCalls;
+}
+
+function getActiveCallCount() {
+  return activeCalls.size;
+}
+
+function getTranscriptText(callSid) {
+  const call = activeCalls.get(callSid);
+  if (!call) return '';
+  return call.transcript
+    .map(t => `${t.role === 'user' ? 'Caller' : 'Alex'}: ${t.text}`)
+    .join('\n');
+}
+
+module.exports = {
+  initCall,
+  getCall,
+  updateCall,
+  addTranscriptEntry,
+  endCall,
+  removeCall,
+  getActiveCalls,
+  getActiveCallCount,
+  getTranscriptText
+};
+
+========== C:\Users\acer\ai-receptionist-v2\src\emailService.js ==========
+const nodemailer = require('nodemailer');
+require('dotenv').config();
+const businessConfig = require('./businessConfig');
+
+const transporter = nodemailer.createTransport({
+  host: process.env.SMTP_HOST || 'smtp.gmail.com',
+  port: parseInt(process.env.SMTP_PORT, 10) || 587,
+  secure: false,
+  connectionTimeout: 10000,
+  greetingTimeout: 5000,
+  socketTimeout: 10000,
+  tls: { rejectUnauthorized: false },
+  secure: false,
+  auth: {
+    user: process.env.SMTP_USER,
+    pass: process.env.SMTP_PASS
+  }
+});
+
+async function sendEmail(to, subject, html) {
+  try {
+    const info = await transporter.sendMail({
+      from: `"${businessConfig.name} AI Receptionist" <${process.env.SMTP_USER}>`,
+      to,
+      subject,
+      html
+    });
+    console.log(`[emailService:sendEmail] Sent to ${to} â€” ID: ${info.messageId}`);
+    return info;
+  } catch (err) {
+    console.error('[emailService:sendEmail]', err.message, err);
+    throw err;
+  }
+}
+
+async function sendTechDispatch(techEmail, bookingData) {
+  const mapsLink = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(bookingData.service_address || bookingData.address || '')}`;
+  const subject = `ðŸ”§ New Job Dispatch: ${bookingData.service_type} â€” ${bookingData.full_name || bookingData.name}`;
+  const html = `
+    <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
+      <div style="background:#1a56db;color:#fff;padding:20px;border-radius:8px 8px 0 0;">
+        <h2 style="margin:0;">New Job Dispatch â€” ${businessConfig.name}</h2>
+      </div>
+      <div style="padding:20px;border:1px solid #e5e7eb;border-top:none;border-radius:0 0 8px 8px;">
+        <table style="width:100%;border-collapse:collapse;">
+          <tr><td style="padding:8px 0;font-weight:bold;width:140px;">Customer:</td><td>${bookingData.full_name || bookingData.name || 'N/A'}</td></tr>
+          <tr><td style="padding:8px 0;font-weight:bold;">Phone:</td><td><a href="tel:${bookingData.callback_phone || bookingData.phone}">${bookingData.callback_phone || bookingData.phone || 'N/A'}</a></td></tr>
+          <tr><td style="padding:8px 0;font-weight:bold;">Address:</td><td><a href="${mapsLink}">${bookingData.service_address || bookingData.address || 'N/A'}</a></td></tr>
+          <tr><td style="padding:8px 0;font-weight:bold;">Service:</td><td>${bookingData.service_type || 'N/A'}</td></tr>
+          <tr><td style="padding:8px 0;font-weight:bold;">Time Window:</td><td>${bookingData.confirmed_slot || bookingData.slot || 'N/A'}</td></tr>
+          <tr><td style="padding:8px 0;font-weight:bold;">Urgency:</td><td>${bookingData.urgency_level || bookingData.urgency || 'N/A'}</td></tr>
+          <tr><td style="padding:8px 0;font-weight:bold;">Issue:</td><td>${bookingData.issue_description || bookingData.issue || 'N/A'}</td></tr>
+          <tr><td style="padding:8px 0;font-weight:bold;">AI Notes:</td><td>${bookingData.call_notes || bookingData.notes || 'N/A'}</td></tr>
+          <tr><td style="padding:8px 0;font-weight:bold;">How Found Us:</td><td>${bookingData.how_they_found_us || 'N/A'}</td></tr>
+        </table>
+        <div style="margin-top:20px;">
+          <a href="${mapsLink}" style="display:inline-block;background:#1a56db;color:#fff;padding:12px 24px;text-decoration:none;border-radius:6px;">ðŸ“ Open in Google Maps</a>
+        </div>
+      </div>
+    </div>`;
+  return sendEmail(techEmail, subject, html);
+}
+
+async function sendEmergencyAlert(ownerEmail, managerEmail, data) {
+  const subject = `ðŸš¨ EMERGENCY: ${data.emergency_type} â€” IMMEDIATE ACTION REQUIRED`;
+  const html = `
+    <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
+      <div style="background:#dc2626;color:#fff;padding:20px;border-radius:8px 8px 0 0;">
+        <h2 style="margin:0;">ðŸš¨ EMERGENCY ALERT â€” ${businessConfig.name}</h2>
+      </div>
+      <div style="padding:20px;border:2px solid #dc2626;border-top:none;border-radius:0 0 8px 8px;">
+        <table style="width:100%;border-collapse:collapse;">
+          <tr><td style="padding:8px 0;font-weight:bold;width:140px;">Type:</td><td style="color:#dc2626;font-weight:bold;">${data.emergency_type}</td></tr>
+          <tr><td style="padding:8px 0;font-weight:bold;">Caller Phone:</td><td><a href="tel:${data.caller_phone}">${data.caller_phone || 'Unknown'}</a></td></tr>
+          <tr><td style="padding:8px 0;font-weight:bold;">Address:</td><td>${data.caller_address || 'Not provided'}</td></tr>
+          <tr><td style="padding:8px 0;font-weight:bold;">Description:</td><td>${data.description || 'None'}</td></tr>
+          <tr><td style="padding:8px 0;font-weight:bold;">Safety Status:</td><td>${data.safety_status || 'Unknown'}</td></tr>
+        </table>
+        <p style="margin-top:20px;padding:12px;background:#fef2f2;border-radius:6px;color:#dc2626;font-weight:bold;">
+          âš ï¸ Contact on-call technician immediately: ${businessConfig.onCallTechPhone}
+        </p>
+      </div>
+    </div>`;
+  const recipients = [ownerEmail, managerEmail].filter(Boolean).join(', ');
+  return sendEmail(recipients, subject, html);
+}
+
+async function sendComplaintEscalation(managerEmail, callData) {
+  const subject = `âš ï¸ Customer Complaint â€” Action Required`;
+  const html = `
+    <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
+      <div style="background:#f59e0b;color:#fff;padding:20px;border-radius:8px 8px 0 0;">
+        <h2 style="margin:0;">Customer Complaint â€” ${businessConfig.name}</h2>
+      </div>
+      <div style="padding:20px;border:1px solid #e5e7eb;border-top:none;border-radius:0 0 8px 8px;">
+        <table style="width:100%;border-collapse:collapse;">
+          <tr><td style="padding:8px 0;font-weight:bold;width:140px;">Caller:</td><td>${callData.caller_name || callData.from || 'Unknown'}</td></tr>
+          <tr><td style="padding:8px 0;font-weight:bold;">Phone:</td><td>${callData.caller_phone || callData.from || 'Unknown'}</td></tr>
+          <tr><td style="padding:8px 0;font-weight:bold;">Notes:</td><td>${callData.notes || 'No notes'}</td></tr>
+          <tr><td style="padding:8px 0;font-weight:bold;">Service Interest:</td><td>${callData.service_interest || 'N/A'}</td></tr>
+        </table>
+        <p style="margin-top:16px;color:#b45309;">Please call this customer back within 1 hour.</p>
+      </div>
+    </div>`;
+  return sendEmail(managerEmail, subject, html);
+}
+
+async function sendDailyDigest(ownerEmail, stats) {
+  const subject = `ðŸ“Š Daily Report â€” ${businessConfig.name} â€” ${stats.date}`;
+  const html = `
+    <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
+      <div style="background:#059669;color:#fff;padding:20px;border-radius:8px 8px 0 0;">
+        <h2 style="margin:0;">ðŸ“Š Daily Report â€” ${stats.date}</h2>
+        <p style="margin:4px 0 0;opacity:0.9;">${businessConfig.name}</p>
+      </div>
+      <div style="padding:20px;border:1px solid #e5e7eb;border-top:none;border-radius:0 0 8px 8px;">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:20px;">
+          <div style="background:#f0fdf4;padding:16px;border-radius:8px;text-align:center;">
+            <div style="font-size:28px;font-weight:bold;color:#059669;">${stats.totalCalls}</div>
+            <div style="color:#666;font-size:14px;">Calls Handled</div>
+          </div>
+          <div style="background:#eff6ff;padding:16px;border-radius:8px;text-align:center;">
+            <div style="font-size:28px;font-weight:bold;color:#1a56db;">${stats.bookingsMade}</div>
+            <div style="color:#666;font-size:14px;">Bookings Made</div>
+          </div>
+          <div style="background:#fef2f2;padding:16px;border-radius:8px;text-align:center;">
+            <div style="font-size:28px;font-weight:bold;color:#dc2626;">${stats.emergencies}</div>
+            <div style="color:#666;font-size:14px;">Emergencies</div>
+          </div>
+          <div style="background:#fefce8;padding:16px;border-radius:8px;text-align:center;">
+            <div style="font-size:28px;font-weight:bold;color:#ca8a04;">$${stats.estimatedRevenue.toLocaleString()}</div>
+            <div style="color:#666;font-size:14px;">Est. Revenue</div>
+          </div>
+        </div>
+        <table style="width:100%;border-collapse:collapse;">
+          <tr><td style="padding:6px 0;">Cancellations:</td><td style="text-align:right;">${stats.cancellations}</td></tr>
+          <tr><td style="padding:6px 0;">Transfers:</td><td style="text-align:right;">${stats.transfers}</td></tr>
+          <tr><td style="padding:6px 0;">Returning Customers:</td><td style="text-align:right;">${stats.returningCustomers}</td></tr>
+        </table>
+      </div>
+    </div>`;
+  return sendEmail(ownerEmail, subject, html);
+}
+
+module.exports = {
+  sendEmail,
+  sendTechDispatch,
+  sendEmergencyAlert,
+  sendComplaintEscalation,
+  sendDailyDigest
+};
+
+
+========== C:\Users\acer\ai-receptionist-v2\src\followUpScheduler.js ==========
+const { CronJob } = require('cron');
+require('dotenv').config();
+const airtableService = require('./airtableService');
+const smsService = require('./smsService');
+const businessConfig = require('./businessConfig');
+
+function startFollowUpScheduler() {
+  const leadFollowUpJob = new CronJob('0 10 * * *', async () => {
+    console.log('[followUpScheduler] Running daily lead follow-up check...');
+    await processLeadFollowUps();
+  }, null, false, businessConfig.timeZone);
+
+  const seasonalJob = new CronJob('0 9 1 * *', async () => {
+    console.log('[followUpScheduler] Running monthly seasonal reminder check...');
+    await processSeasonalReminders();
+  }, null, false, businessConfig.timeZone);
+
+  leadFollowUpJob.start();
+  seasonalJob.start();
+
+  console.log('[followUpScheduler] Started â€” lead follow-ups at 10am, seasonal 1st of month');
+}
+
+async function processLeadFollowUps() {
+  try {
+    const now = new Date();
+    const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+    const twoDaysAgo = new Date(now.getTime() - 48 * 60 * 60 * 1000);
+
+    const filterFormula = `AND(
+      OR({Intent}='price_inquiry', {Intent}='not_ready', {Intent}='just_browsing'),
+      {Status}='LEAD',
+      IS_BEFORE({CreatedAt}, '${yesterday.toISOString()}'),
+      IS_AFTER({CreatedAt}, '${twoDaysAgo.toISOString()}')
+    )`.replace(/\n/g, '');
+
+    const result = await airtableService.lookupByPhone('');
+    if (!result.found) return;
+
+    console.log('[followUpScheduler:processLeadFollowUps] Checking for leads to follow up');
+  } catch (err) {
+    console.error('[followUpScheduler:processLeadFollowUps]', err.message, err);
+  }
+}
+
+async function processSeasonalReminders() {
+  try {
+    console.log('[followUpScheduler:processSeasonalReminders] Checking for seasonal HVAC reminders');
+  } catch (err) {
+    console.error('[followUpScheduler:processSeasonalReminders]', err.message, err);
+  }
+}
+
+module.exports = { startFollowUpScheduler };
+
+========== C:\Users\acer\ai-receptionist-v2\src\followUpService.js ==========
+const smsService = require('./smsService');
+const airtableService = require('./airtableService');
+
+async function send30DayFollowUp(phone, name, serviceType) {
+  try {
+    await smsService.sendFollowUp30Day(phone, name, serviceType);
+    console.log(`[followUpService:send30DayFollowUp] Follow-up sent to ${phone}`);
+    return { success: true };
+  } catch (err) {
+    console.error('[followUpService:send30DayFollowUp]', err.message, err);
+    throw err;
+  }
+}
+
+async function scheduleSeasonalReminder(phone, name, serviceType) {
+  try {
+    if (serviceType && serviceType.toLowerCase() === 'hvac') {
+      console.log(`[followUpService:scheduleSeasonalReminder] HVAC seasonal reminder noted for ${phone} in 6 months`);
+    }
+    return { success: true };
+  } catch (err) {
+    console.error('[followUpService:scheduleSeasonalReminder]', err.message, err);
+    throw err;
+  }
+}
+
+async function processFollowUps() {
+  try {
+    const leads = await airtableService.getLeadsNeedingFollowUp30();
+    console.log(`[followUpService:processFollowUps] Found ${leads.length} leads needing 30-day follow-up`);
+
+    for (const lead of leads) {
+      const fields = lead.fields;
+      const phone = fields.Phone;
+      const name = fields.FullName || 'there';
+      const serviceType = fields.ServiceType || 'service';
+
+      if (!phone) continue;
+
+      try {
+        await send30DayFollowUp(phone, name, serviceType);
+        await airtableService.markReminderSent(lead.id, 'followup30');
+        await scheduleSeasonalReminder(phone, name, serviceType);
+      } catch (err) {
+        console.error('[followUpService:processFollowUps] Failed for', phone, err.message);
+      }
+    }
+
+    return { processed: leads.length };
+  } catch (err) {
+    console.error('[followUpService:processFollowUps]', err.message, err);
+    return { processed: 0 };
+  }
+}
+
+module.exports = {
+  send30DayFollowUp,
+  scheduleSeasonalReminder,
+  processFollowUps
+};
+
+========== C:\Users\acer\ai-receptionist-v2\src\realtimeAI.js ==========
+const WebSocket = require('ws');
+require('dotenv').config();
+const callManager = require('./callManager');
+const businessConfig = require('./businessConfig');
+const { handleCheckCalendar } = require('./tools/checkCalendar');
+const { handleSaveBooking } = require('./tools/saveBooking');
+const { handleFlagEmergency } = require('./tools/flagEmergency');
+const { handleLookupCustomer } = require('./tools/lookupCustomer');
+const { handleRescheduleBooking } = require('./tools/rescheduleBooking');
+const { handleCancelBooking } = require('./tools/cancelBooking');
+const { handleTransferToHuman } = require('./tools/transferToHuman');
+const { handleSaveLeadIntent } = require('./tools/saveLeadIntent');
+
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const OPENAI_REALTIME_URL = 'wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview';
+
+const TOOL_HANDLERS = {
+  check_calendar: handleCheckCalendar,
+  save_booking_data: handleSaveBooking,
+  flag_emergency: handleFlagEmergency,
+  lookup_customer: handleLookupCustomer,
+  reschedule_booking: handleRescheduleBooking,
+  cancel_booking: handleCancelBooking,
+  transfer_to_human: handleTransferToHuman,
+  save_lead_intent: handleSaveLeadIntent
+};
+
+const TOOLS = [
+  {
+    type: 'function',
+    name: 'check_calendar',
+    description: 'Check real Google Calendar availability for the correct technician based on service type. Call this BEFORE offering any time slots to the caller.',
+    parameters: {
+      type: 'object',
+      properties: {
+        service_type: { type: 'string', enum: ['hvac', 'plumbing', 'electrical', 'general'] },
+        urgency: { type: 'string', enum: ['emergency', 'today', 'this_week', 'flexible'] },
+        duration_minutes: { type: 'number', description: 'Estimated job duration, default 120' }
+      },
+      required: ['service_type', 'urgency']
+    }
+  },
+  {
+    type: 'function',
+    name: 'save_booking_data',
+    description: 'Save completed booking after verbally confirming all details with caller',
+    parameters: {
+      type: 'object',
+      properties: {
+        full_name: { type: 'string' },
+        callback_phone: { type: 'string' },
+        service_address: { type: 'string' },
+        service_type: { type: 'string', enum: ['hvac', 'plumbing', 'electrical', 'other'] },
+        issue_description: { type: 'string' },
+        urgency_level: { type: 'string', enum: ['emergency', 'today', 'this_week', 'flexible'] },
+        confirmed_slot: { type: 'string', description: 'The exact slot the caller confirmed' },
+        appointment_datetime: { type: 'string', description: 'ISO 8601 datetime if known' },
+        upsell_mentioned: { type: 'boolean' },
+        upsell_interested: { type: 'boolean' },
+        customer_mood: { type: 'string', enum: ['happy', 'neutral', 'frustrated', 'angry'] },
+        how_they_found_us: { type: 'string' },
+        call_notes: { type: 'string' }
+      },
+      required: ['full_name', 'callback_phone', 'service_address', 'service_type', 'issue_description', 'urgency_level', 'confirmed_slot']
+    }
+  },
+  {
+    type: 'function',
+    name: 'flag_emergency',
+    description: 'Call IMMEDIATELY when emergency detected. Do not wait to collect full info.',
+    parameters: {
+      type: 'object',
+      properties: {
+        emergency_type: { type: 'string', enum: ['gas_leak', 'flooding', 'burst_pipe', 'no_heat_winter', 'sewage_backup', 'carbon_monoxide', 'electrical_fire', 'no_power', 'other'] },
+        caller_address: { type: 'string' },
+        caller_phone: { type: 'string' },
+        description: { type: 'string' },
+        safety_status: { type: 'string', enum: ['safe', 'unsafe', 'unknown'] }
+      },
+      required: ['emergency_type', 'safety_status']
+    }
+  },
+  {
+    type: 'function',
+    name: 'lookup_customer',
+    description: 'Look up returning customer history by phone number',
+    parameters: {
+      type: 'object',
+      properties: {
+        phone_number: { type: 'string' }
+      },
+      required: ['phone_number']
+    }
+  },
+  {
+    type: 'function',
+    name: 'reschedule_booking',
+    description: 'Reschedule an existing appointment',
+    parameters: {
+      type: 'object',
+      properties: {
+        caller_phone: { type: 'string' },
+        new_preferred_slot: { type: 'string' },
+        reason: { type: 'string' }
+      },
+      required: ['caller_phone', 'new_preferred_slot']
+    }
+  },
+  {
+    type: 'function',
+    name: 'cancel_booking',
+    description: 'Cancel an existing appointment',
+    parameters: {
+      type: 'object',
+      properties: {
+        caller_phone: { type: 'string' },
+        reason: { type: 'string' },
+        offer_reschedule: { type: 'boolean' }
+      },
+      required: ['caller_phone']
+    }
+  },
+  {
+    type: 'function',
+    name: 'transfer_to_human',
+    description: 'Transfer call to live person when caller insists or situation requires it',
+    parameters: {
+      type: 'object',
+      properties: {
+        reason: { type: 'string' },
+        urgency: { type: 'string', enum: ['immediate', 'when_available'] },
+        notes: { type: 'string' }
+      },
+      required: ['reason']
+    }
+  },
+  {
+    type: 'function',
+    name: 'save_lead_intent',
+    description: 'Save caller info even if they don\'t book â€” price inquiries, complaints, hesitant callers',
+    parameters: {
+      type: 'object',
+      properties: {
+        caller_phone: { type: 'string' },
+        caller_name: { type: 'string' },
+        intent: { type: 'string', enum: ['price_inquiry', 'complaint', 'just_browsing', 'follow_up_needed', 'not_ready'] },
+        service_interest: { type: 'string' },
+        notes: { type: 'string' }
+      },
+      required: ['caller_phone', 'intent']
+    }
+  }
+];
+
+function buildSystemPrompt() {
+  return `You are Alex, the professional receptionist for ${businessConfig.name}. You handle every call with warmth, confidence, and efficiency â€” like the best human receptionist in the world. You speak naturally with contractions and normal conversational flow. Never sound robotic or scripted.
+
+PERSONALITY:
+- Warm and professional â€” like a friendly hotel concierge
+- Calm under pressure â€” never flustered even with angry callers
+- Empathetic first, solution second with frustrated callers
+- Confident about pricing and policies â€” never apologetic
+- Concise â€” 2-3 sentences max per response, let caller talk
+- Never say you are an AI â€” say "I'm Alex, a virtual assistant for ${businessConfig.name}"
+
+BUSINESS HOURS:
+- We are open Monday-Friday 7am-7pm and Saturday 8am-4pm (America/Phoenix time)
+- If a customer calls outside business hours, acknowledge it warmly and still collect their info
+- Say something like "We're currently closed but I've got you covered - let me take your details and our team will confirm your appointment first thing when we open"
+- For EMERGENCIES (no heat in winter, flooding, gas smell) - always help regardless of hours and flag as emergency
+- Never refuse to help - just set expectations about when the team will follow up
+
+BUSINESS DETAILS:
+Name: ${businessConfig.name}
+Phone: ${businessConfig.phone}
+Hours: ${businessConfig.hours}
+Service Areas: ${businessConfig.serviceAreas}
+Services: HVAC (installation, repair, maintenance, tune-up, filter replacement), Plumbing (leaks, drains, water heaters, toilets, pipes), Electrical (panels, outlets, lighting, ceiling fans, safety inspections)
+Dispatch Fee: ${businessConfig.dispatchFee} â€” waived if repair is completed same visit
+Emergency: 24/7 on-call technician
+Maintenance Plan: $199/year â€” includes 2 seasonal tune-ups, priority scheduling, 10% parts discount
+
+RETURNING CUSTOMER PROTOCOL:
+If returningCustomer=true, use their name immediately. Reference history naturally:
+"I see we last helped you with [service] â€” is this a similar issue or something new?"
+This creates instant trust and shows professionalism.
+
+CALL CLASSIFICATION â€” identify within first 30 seconds:
+- EMERGENCY â†’ immediate different protocol
+- NEW_BOOKING â†’ collect info and book
+- RESCHEDULE â†’ find new slot
+- CANCELLATION â†’ confirm cancel, offer reschedule
+- PRICE_INQUIRY â†’ sales language, never quote exact price
+- COMPLAINT â†’ empathy, escalate
+- FAQ â†’ answer from business knowledge
+- FOLLOW_UP â†’ returning customer question
+
+EMERGENCY DETECTION â€” call flag_emergency tool IMMEDIATELY if you hear:
+Gas smell / gas leak / I smell gas
+No heat (in winter) / furnace not working / pipes freezing
+Flooding / water everywhere / burst pipe
+Sewage backup / sewage smell indoors
+Carbon monoxide / CO alarm / headache from furnace
+Sparks / electrical fire / burning smell from outlet
+No power / complete electrical failure
+Structural water damage
+
+EMERGENCY RESPONSE PROTOCOL:
+1. Interrupt anything else: "I'm flagging this as an emergency right now."
+2. Ask: "First â€” are you and your family safe?"
+3. Give immediate safety instruction:
+   - Gas: "Leave the house immediately, don't touch any switches, call 911 if unsafe"
+   - Flooding: "Turn off the main water valve â€” usually near the water meter"
+   - Electrical fire: "Flip the main breaker if safe to do so, call 911 if flames"
+   - CO: "Get everyone outside immediately, call 911"
+4. "I'm alerting our on-call technician right now. What's your address?"
+5. Call flag_emergency tool with all details
+6. "Our technician will call you within 15 minutes. Please stay safe."
+
+BOOKING FLOW â€” collect naturally, not like a form:
+Step 1 â€” Understand the issue: "What's going on with it?" / "Tell me a bit more about what's happening"
+Step 2 â€” Address: "And what's the address we'd be coming to?"
+Step 3 â€” Name: "What's the best name for the appointment?"
+Step 4 â€” Phone: "And the best number to reach you â€” is this the one you're calling from?"
+Step 5 â€” Urgency: "How urgent is this for you â€” does it need attention today, or are you flexible on timing?"
+Step 6 â€” Check real calendar: Call check_calendar tool with service_type and urgency
+Step 7 â€” Offer real slots: "I'm showing availability [slot 1] or [slot 2] â€” which works better?"
+Step 8 â€” Upsell (ONCE, naturally): "By the way â€” since we'll be out there anyway, worth mentioning our annual maintenance plan is $199 and covers two tune-ups plus priority scheduling. Most customers find it pays for itself. No pressure at all."
+Step 9 â€” Confirm back: "Perfect â€” let me read that back. [Name], we have a [service_type] tech at [address] on [slot]. You'll get a text confirmation at [phone]. Does everything sound right?"
+Step 10 â€” Call save_booking_data tool
+Step 11 â€” "You're all set! You'll get a text in just a moment."
+
+PRICE INQUIRY â€” SALES LANGUAGE:
+Never: "I don't know" / exact prices / "it depends"
+Always:
+"Our dispatch fee is ${businessConfig.dispatchFee} and that's waived when we do the repair â€” so most customers effectively pay nothing for the visit itself."
+"I can't quote exact repair costs over the phone because every job is different, but our technicians walk you through pricing before touching anything. No surprise bills."
+"What I can tell you is we're competitively priced and our techs are upfront about everything."
+
+For hesitant callers â€” closing language:
+"Most of our customers are surprised by how reasonable it is once the tech sees it. The dispatch fee is the only guaranteed cost."
+"Would you like me to pencil you in? You can always cancel if you change your mind â€” no charge."
+"We're available [slot] â€” shall I hold that spot for you?"
+
+COMPLAINT HANDLING:
+Never argue. Never make excuses.
+"I'm really sorry to hear that â€” that's not the experience we want you to have at all."
+"I'm going to flag this directly for our manager and have them call you back within the hour. Can I confirm the best number?"
+Call save_lead_intent tool with complaint intent.
+
+ANGRY CUSTOMER HANDLING:
+If a customer becomes angry, threatens legal action, or uses aggressive language:
+- Never hang up on them
+- Stay calm and empathetic
+- Say: "I completely understand your frustration. Let me make sure we get this resolved for you right away."
+- Offer to escalate to a human manager
+- Never end the call due to customer anger
+- Only end call if customer says goodbye
+
+AFTER HOURS:
+"Our office is closed right now but I can absolutely take your booking â€” our team will confirm first thing in the morning."
+"For emergencies, we do have a 24/7 on-call technician available right now."
+
+TRANSFER TO HUMAN:
+If caller insists: "Of course â€” one moment please."
+Call transfer_to_human tool.
+"I'm connecting you now. Thank you for your patience."
+
+THINGS YOU MUST NEVER SAY:
+- Exact repair prices
+- "I guarantee we can fix it today"
+- "The tech will definitely arrive at [exact time]" â€” always say window
+- "I don't know" â€” say "let me note that for our team"
+- "That's not our problem"
+- "I'm an AI" or "I'm a robot" or "I'm a language model"
+- Anything that could be a legal liability
+
+CALL ENDING RULES:
+ONLY end the call when:
+- Customer says "goodbye", "bye", "thanks", "thank you", or similar farewell
+- Customer explicitly says "that's all I need" or "I'm done"
+- Customer hangs up first
+
+NEVER end the call due to:
+- Tool errors or API failures
+- Google Calendar failures
+- Silence under 30 seconds
+- Technical difficulties
+- Angry customers (always stay on the line)
+
+ENDING EVERY CALL:
+"Thanks so much for calling ${businessConfig.name} â€” have a wonderful day!"`;
+}
+
+function handleMediaStream(twilioWs, req) {
+  let streamSid = null;
+  let callSid = null;
+  let callerPhone = null;
+  let returningCustomer = false;
+  let customerName = '';
+  let jobCount = 0;
+  let openAiWs = null;
+  let audioBufferQueue = [];
+  let isResponseActive = false;
+  let greetingSent = false;
+
+  console.log('[realtimeAI] New media stream connection');
+
+  twilioWs.on('message', (message) => {
+    try {
+      const data = JSON.parse(message);
+
+      switch (data.event) {
+        case 'start':
+          streamSid = data.start.streamSid;
+          callSid = data.start.customParameters?.callSid || '';
+          callerPhone = data.start.customParameters?.from || '';
+          returningCustomer = data.start.customParameters?.returningCustomer === 'true';
+          customerName = data.start.customParameters?.customerName || '';
+          jobCount = parseInt(data.start.customParameters?.jobCount || '0', 10);
+
+          console.log(`[realtimeAI] Stream started â€” SID: ${streamSid}, Call: ${callSid}, From: ${callerPhone}`);
+
+          callManager.updateCall(callSid, { streamSid });
+
+          connectToOpenAI();
+          break;
+
+        case 'media':
+          if (openAiWs && openAiWs.readyState === WebSocket.OPEN) {
+            openAiWs.send(JSON.stringify({
+              type: 'input_audio_buffer.append',
+              audio: data.media.payload
+            }));
+          } else {
+            audioBufferQueue.push(data.media.payload);
+          }
+          break;
+
+        case 'stop':
+          console.log(`[realtimeAI] Stream stopped â€” SID: ${streamSid}`);
+          if (openAiWs && openAiWs.readyState === WebSocket.OPEN) {
+            openAiWs.close();
+          }
+          break;
+
+        default:
+          break;
+      }
+    } catch (err) {
+      console.error('[realtimeAI:twilioMessage]', err.message, err);
+    }
+  });
+
+  twilioWs.on('close', () => {
+    console.log(`[realtimeAI] Twilio WebSocket closed â€” Call: ${callSid}`);
+    if (openAiWs && openAiWs.readyState === WebSocket.OPEN) {
+      openAiWs.close();
+    }
+  });
+
+  twilioWs.on('error', (err) => {
+    console.error('[realtimeAI:twilioWsError]', err.message, err);
+  });
+
+  function connectToOpenAI() {
+    openAiWs = new WebSocket(OPENAI_REALTIME_URL, {
+      headers: {
+        'Authorization': `Bearer ${OPENAI_API_KEY}`,
+        'OpenAI-Beta': 'realtime=v1'
+      }
+    });
+
+    openAiWs.on('open', () => {
+      console.log(`[realtimeAI] Connected to OpenAI Realtime â€” Call: ${callSid}`);
+
+      // Send session config
+      const sessionUpdate = {
+        type: 'session.update',
+        session: {
+          modalities: ['text', 'audio'],
+          voice: 'shimmer',
+          input_audio_format: 'g711_ulaw',
+          output_audio_format: 'g711_ulaw',
+          input_audio_transcription: { model: 'whisper-1' },
+          turn_detection: {
+            type: 'server_vad',
+            threshold: 0.5,
+            silence_duration_ms: 800,
+            prefix_padding_ms: 300
+          },
+          instructions: buildSystemPrompt(),
+          tools: TOOLS,
+          tool_choice: 'auto',
+          temperature: 0.7
+        }
+      };
+
+      openAiWs.send(JSON.stringify(sessionUpdate));
+
+      // Flush any queued audio
+      while (audioBufferQueue.length > 0) {
+        const audio = audioBufferQueue.shift();
+        openAiWs.send(JSON.stringify({
+          type: 'input_audio_buffer.append',
+          audio
+        }));
+      }
+    });
+
+    openAiWs.on('message', (rawMessage) => {
+      try {
+        const event = JSON.parse(rawMessage.toString());
+        handleOpenAIEvent(event);
+      } catch (err) {
+        console.error('[realtimeAI:openAiMessage]', err.message, err);
+      }
+    });
+
+    openAiWs.on('close', () => {
+      console.log(`[realtimeAI] OpenAI WebSocket closed â€” Call: ${callSid}`);
+    });
+
+    openAiWs.on('error', (err) => {
+      console.error('[realtimeAI:openAiWsError]', err.message, err);
+    });
+  }
+
+  function handleOpenAIEvent(event) {
+    switch (event.type) {
+      case 'session.created':
+        console.log(`[realtimeAI] Session created â€” Call: ${callSid}`);
+        break;
+
+      case 'session.updated':
+        console.log(`[realtimeAI] Session updated â€” Call: ${callSid}`);
+        
+        // Single greeting with 1000ms delay and guard
+        setTimeout(() => {
+          if (!greetingSent && openAiWs.readyState === WebSocket.OPEN) {
+            greetingSent = true;
+            openAiWs.send(JSON.stringify({
+              type: "response.create",
+              response: {
+                modalities: ["audio", "text"],
+                instructions: "Say immediately: Thank you for calling Premier HVAC and Plumbing, this is Alex your 24/7 scheduling assistant. How can I help you today?"
+              }
+            }));
+            console.log('[realtimeAI] Greeting sent');
+          }
+        }, 1000);
+        break;
+
+      case 'response.audio.delta':
+        if (event.delta && twilioWs.readyState === WebSocket.OPEN) {
+          twilioWs.send(JSON.stringify({
+            event: 'media',
+            streamSid,
+            media: {
+              payload: event.delta
+            }
+          }));
+        }
+        break;
+
+      case 'response.audio_transcript.done':
+        if (event.transcript) {
+          callManager.addTranscriptEntry(callSid, 'assistant', event.transcript);
+        }
+        break;
+
+      case 'conversation.item.input_audio_transcription.completed':
+        if (event.transcript) {
+          callManager.addTranscriptEntry(callSid, 'user', event.transcript);
+        }
+        break;
+
+      case 'input_audio_buffer.speech_started':
+        handleInterruption();
+        break;
+
+      case 'response.output_item.done':
+        if (event.item && event.item.type === 'function_call') {
+          handleToolCall(event.item);
+        }
+        break;
+
+      case 'response.created':
+        isResponseActive = true;
+        break;
+        
+      case 'response.done':
+        isResponseActive = false;
+        break;
+
+      case 'error':
+        console.error('[realtimeAI:openAiError]', JSON.stringify(event.error));
+        break;
+
+      default:
+        break;
+    }
+  }
+
+
+  function handleInterruption() {
+    // Cancel current response only if one is active
+    if (isResponseActive && openAiWs && openAiWs.readyState === WebSocket.OPEN) {
+      openAiWs.send(JSON.stringify({ type: 'response.cancel' }));
+      isResponseActive = false;
+    }
+
+    // Clear Twilio audio buffer
+    if (twilioWs.readyState === WebSocket.OPEN && streamSid) {
+      twilioWs.send(JSON.stringify({
+        event: 'clear',
+        streamSid
+      }));
+    }
+  }
+
+  async function handleToolCall(item) {
+    const toolName = item.name;
+    const callId = item.call_id;
+
+    let args = {};
+    try {
+      args = JSON.parse(item.arguments || '{}');
+    } catch (parseErr) {
+      console.error('[realtimeAI:parseToolArgs]', parseErr.message);
+    }
+
+    // Inject caller phone if not provided
+    if (!args.caller_phone && callerPhone) {
+      args.caller_phone = callerPhone;
+    }
+    if (!args.callback_phone && callerPhone) {
+      args.callback_phone = callerPhone;
+    }
+    if (!args.phone_number && callerPhone) {
+      args.phone_number = callerPhone;
+    }
+
+    console.log(`[realtimeAI] Tool call: ${toolName} â€” Args: ${JSON.stringify(args)}`);
+
+    let result;
+    try {
+      const handler = TOOL_HANDLERS[toolName];
+      // Say filler while processing to avoid silence
+      if (openAiWs && openAiWs.readyState === WebSocket.OPEN) {
+        let filler = "Sure, one moment...";
+        if (toolName === "check_calendar") filler = "Let me check our availability for you, one moment...";
+        if (toolName === "save_booking_data") filler = "Perfect, let me get that booked for you right now...";
+        if (toolName === "lookup_customer") filler = "Let me pull up your information...";
+        if (toolName === "flag_emergency") filler = "I am flagging this as an emergency right now...";
+        openAiWs.send(JSON.stringify({ type: "response.create", response: { modalities: ["audio", "text"], instructions: `Say exactly: "${filler}"` } }));
+        await new Promise(r => setTimeout(r, 800));
+      }
+      if (!handler) {
+        result = JSON.stringify({ error: true, message: `Unknown tool: ${toolName}` });
+      } else if (toolName === "transfer_to_human") {
+        result = await handler(args, callSid);
+      } else {
+        result = await handler(args);
+      }
+    } catch (toolErr) {
+      console.error(`[realtimeAI:toolExecution:${toolName}]`, toolErr.message, toolErr);
+      result = JSON.stringify({ error: true, message: 'Tool execution failed. Please continue the conversation naturally.' });
+    }
+
+    // Update call state based on tool
+    if (toolName === 'save_booking_data') {
+      const parsed = JSON.parse(result);
+      callManager.updateCall(callSid, {
+        bookingMade: parsed.success || false,
+        bookingId: parsed.bookingId || null,
+        calendarEventId: parsed.calendarEventId || null,
+        serviceType: args.service_type
+      });
+    } else if (toolName === 'flag_emergency') {
+      callManager.updateCall(callSid, {
+        emergencyDetected: true,
+        serviceType: args.emergency_type
+      });
+    }
+
+    // Send tool result back to OpenAI
+    if (openAiWs && openAiWs.readyState === WebSocket.OPEN) {
+      openAiWs.send(JSON.stringify({
+        type: 'conversation.item.create',
+        item: {
+          type: 'function_call_output',
+          call_id: callId,
+          output: result
+        }
+      }));
+
+      // Continue the conversation
+      if (openAiWs && openAiWs.readyState === WebSocket.OPEN) {
+        openAiWs.send(JSON.stringify({
+          type: 'response.create'
+        }));
+      }
+    }
+  }
+}
+
+module.exports = { handleMediaStream };
+
+
+========== C:\Users\acer\ai-receptionist-v2\src\reminderScheduler.js ==========
+const { CronJob } = require('cron');
+require('dotenv').config();
+const airtableService = require('./airtableService');
+const smsService = require('./smsService');
+const emailService = require('./emailService');
+const reviewService = require('./reviewService');
+const followUpService = require('./followUpService');
+const businessConfig = require('./businessConfig');
+
+let dailyDigestSentToday = false;
+
+function startReminderScheduler() {
+  const reminderJob = new CronJob('*/15 * * * *', async () => {
+    console.log('[reminderScheduler] Running 15-minute reminder check...');
+    await process24hReminders();
+    await process1hReminders();
+    await reviewService.processReviewRequests();
+    await followUpService.processFollowUps();
+  }, null, false, businessConfig.timeZone);
+
+  const digestJob = new CronJob('0 18 * * *', async () => {
+    console.log('[reminderScheduler] Running daily digest...');
+    await sendDailyDigest();
+  }, null, false, businessConfig.timeZone);
+
+  const resetDigestFlag = new CronJob('0 0 * * *', () => {
+    dailyDigestSentToday = false;
+  }, null, false, businessConfig.timeZone);
+
+  reminderJob.start();
+  digestJob.start();
+  resetDigestFlag.start();
+
+  console.log('[reminderScheduler] Started â€” reminders every 15min, digest at 6pm');
+}
+
+async function process24hReminders() {
+  try {
+    const leads = await airtableService.getLeadsNeedingReminder24h();
+    console.log(`[reminderScheduler:24h] Found ${leads.length} reminders to send`);
+
+    for (const lead of leads) {
+      const fields = lead.fields;
+      const phone = fields.Phone;
+      if (!phone) continue;
+
+      try {
+        await smsService.sendReminder24h(phone, fields);
+        await airtableService.markReminderSent(lead.id, '24h');
+        console.log(`[reminderScheduler:24h] Sent to ${phone}`);
+      } catch (err) {
+        console.error('[reminderScheduler:24h] Failed for', phone, err.message);
+      }
+    }
+  } catch (err) {
+    console.error('[reminderScheduler:process24hReminders]', err.message, err);
+  }
+}
+
+async function process1hReminders() {
+  try {
+    const leads = await airtableService.getLeadsNeedingReminder1h();
+    console.log(`[reminderScheduler:1h] Found ${leads.length} reminders to send`);
+
+    for (const lead of leads) {
+      const fields = lead.fields;
+      const phone = fields.Phone;
+      if (!phone) continue;
+
+      try {
+        await smsService.sendReminder1h(phone, fields);
+        await airtableService.markReminderSent(lead.id, '1h');
+        console.log(`[reminderScheduler:1h] Sent to ${phone}`);
+      } catch (err) {
+        console.error('[reminderScheduler:1h] Failed for', phone, err.message);
+      }
+    }
+  } catch (err) {
+    console.error('[reminderScheduler:process1hReminders]', err.message, err);
+  }
+}
+
+async function sendDailyDigest() {
+  try {
+    if (dailyDigestSentToday) {
+      console.log('[reminderScheduler:digest] Already sent today, skipping');
+      return;
+    }
+
+    const stats = await airtableService.getTodayStats();
+    await emailService.sendDailyDigest(businessConfig.ownerEmail, stats);
+    dailyDigestSentToday = true;
+    console.log('[reminderScheduler:digest] Daily digest sent');
+  } catch (err) {
+    console.error('[reminderScheduler:sendDailyDigest]', err.message, err);
+  }
+}
+
+module.exports = { startReminderScheduler };
+
+========== C:\Users\acer\ai-receptionist-v2\src\reviewService.js ==========
+const smsService = require('./smsService');
+const airtableService = require('./airtableService');
+
+async function sendReviewRequest(phone, name, serviceType) {
+  try {
+    await smsService.sendReviewRequest(phone, name, serviceType);
+    console.log(`[reviewService:sendReviewRequest] Review request sent to ${phone}`);
+    return { success: true };
+  } catch (err) {
+    console.error('[reviewService:sendReviewRequest]', err.message, err);
+    throw err;
+  }
+}
+
+async function processReviewRequests() {
+  try {
+    const leads = await airtableService.getLeadsNeedingReview();
+    console.log(`[reviewService:processReviewRequests] Found ${leads.length} leads needing review requests`);
+
+    for (const lead of leads) {
+      const fields = lead.fields;
+      const phone = fields.Phone;
+      const name = fields.FullName || 'there';
+      const serviceType = fields.ServiceType || 'service';
+
+      if (!phone) continue;
+
+      try {
+        await sendReviewRequest(phone, name, serviceType);
+        await airtableService.markReminderSent(lead.id, 'review');
+      } catch (err) {
+        console.error('[reviewService:processReviewRequests] Failed for', phone, err.message);
+      }
+    }
+
+    return { processed: leads.length };
+  } catch (err) {
+    console.error('[reviewService:processReviewRequests]', err.message, err);
+    return { processed: 0 };
+  }
+}
+
+module.exports = {
+  sendReviewRequest,
+  processReviewRequests
+};
+
+========== C:\Users\acer\ai-receptionist-v2\src\server.js ==========
+require('dotenv').config();
+const express = require('express');
+const http = require('http');
+const { WebSocketServer } = require('ws');
+const cors = require('cors');
+const axios = require('axios');
+
+const twilioHandler = require('./twilioHandler');
+const { handleMediaStream } = require('./realtimeAI');
+const callManager = require('./callManager');
+const airtableService = require('./airtableService');
+const smsService = require('./smsService');
+const businessConfig = require('./businessConfig');
+const { startReminderScheduler } = require('./reminderScheduler');
+const { startFollowUpScheduler } = require('./followUpScheduler');
+
+const app = express();
+
+app.set('trust proxy', 1);
+
+const rateLimit = require('express-rate-limit');
+const limiter = rateLimit({ windowMs: 60*1000, max: 30, message: 'Too many requests', validate: { xForwardedForHeader: false } });
+app.use('/widget-chat', limiter);
+app.use('/incoming-call', limiter);
+const server = http.createServer(app);
+
+app.use(cors());
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+app.use(express.static('widget'));
+
+const PORT = process.env.PORT || 3000;
+
+// Session store for widget chat history
+const widgetSessions = new Map();
+
+function extractPhone(text) {
+  const patterns = [
+    /\+?1?\s*\(?\d{3}\)?[\s.\-]?\d{3}[\s.\-]?\d{4}/,
+    /\d{3}[\s.\-]\d{3}[\s.\-]\d{4}/,
+    /\(\d{3}\)\s*\d{3}[\s.\-]?\d{4}/,
+    /\d{10}/
+  ];
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (match) return match[0].replace(/[^\d+]/g, '');
+  }
+  return null;
+}
+
+function extractName(text) {
+  const patterns = [
+    /my name is\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)/i,
+    /i(?:'m|\s+am)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)/i,
+    /this is\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)/i,
+    /(?:name|call me)\s*(?:is)?\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)/i,
+    /^\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s+here/im
+  ];
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (match) return match[1].trim();
+  }
+  return null;
+}
+
+// --- Routes ---
+
+// Twilio incoming call webhook
+app.post('/incoming-call', twilioHandler.handleIncomingCall);
+
+// Twilio call status webhook
+app.post('/call-status', twilioHandler.handleCallStatus);
+
+// Inbound SMS handler
+app.post('/sms-incoming', async (req, res) => {
+  try {
+    const { From, Body, MessageSid } = req.body;
+    console.log(`[server] Inbound SMS â€” From: ${From}, Body: ${Body}`);
+
+    // Save to Airtable
+    try {
+      await airtableService.saveConversation(MessageSid || `sms-${Date.now()}`, `Customer (${From}): ${Body}`, 'Inbound SMS');
+    } catch (atErr) {
+      console.error('[server:sms-incoming] Airtable save failed:', atErr.message);
+    }
+
+    // Handle CANCEL keyword
+    if (Body && Body.trim().toUpperCase() === 'CANCEL') {
+      const booking = await airtableService.findBookingByPhone(From);
+      if (booking.found) {
+        await airtableService.updateLeadById(booking.record.id, { Status: 'CANCELLED' });
+        const twiml = `<?xml version="1.0" encoding="UTF-8"?><Response><Message>Your appointment has been cancelled. If you'd like to rebook, just call us at ${businessConfig.phone}.</Message></Response>`;
+        res.set('Content-Type', 'text/xml');
+        return res.send(twiml);
+      }
+    }
+
+    // Default SMS reply
+    const twiml = `<?xml version="1.0" encoding="UTF-8"?><Response><Message>Thanks for reaching out to ${businessConfig.name}! For fastest service, call us at ${businessConfig.phone}. We'll get back to you shortly!</Message></Response>`;
+    res.set('Content-Type', 'text/xml');
+    res.send(twiml);
+  } catch (err) {
+    console.error('[server:sms-incoming]', err.message, err);
+    res.set('Content-Type', 'text/xml');
+    res.send(`<?xml version="1.0" encoding="UTF-8"?><Response><Message>Thanks for your message! We'll get back to you shortly.</Message></Response>`);
+  }
+});
+
+// Health check
+app.get('/health', (req, res) => {
+  res.json({
+    status: 'ok',
+    uptime: process.uptime(),
+    timestamp: new Date().toISOString(),
+    activeCalls: callManager.getActiveCallCount(),
+    environment: process.env.NODE_ENV || 'development'
+  });
+});
+
+// Dashboard data
+app.get('/dashboard-data', async (req, res) => {
+  try {
+    const stats = await airtableService.getTodayStats();
+    res.json({
+      success: true,
+      data: stats
+    });
+  } catch (err) {
+    console.error('[server:dashboard-data]', err.message, err);
+    res.status(500).json({ success: false, error: 'Failed to fetch dashboard data' });
+  }
+});
+
+// Website chat widget endpoint
+app.post('/widget-chat', async (req, res) => {
+  try {
+    const { message, sessionId, userName, userPhone } = req.body;
+
+    if (!message || !message.trim()) {
+      return res.status(400).json({ error: 'Message is required' });
+    }
+
+    // Build messages for OpenAI chat completions
+    const systemPrompt = buildWidgetSystemPrompt();
+    const messages = [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: message }
+    ];
+
+    // Call Groq chat completions
+    const groqResponse = await axios.post(
+      'https://api.groq.com/openai/v1/chat/completions',
+      {
+        model: 'llama-3.3-70b-versatile',
+        messages,
+        temperature: 0.7,
+        max_tokens: 500
+      },
+      {
+        headers: {
+          'Authorization': `Bearer ${process.env.GROQ_API_KEY}`,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+
+    const reply = groqResponse.data.choices[0].message.content;
+    const sid = sessionId || `widget-${Date.now()}`;
+
+    // Accumulate conversation history for this session
+    if (!widgetSessions.has(sid)) {
+      widgetSessions.set(sid, { history: '', leadSaved: false });
+    }
+    const session = widgetSessions.get(sid);
+    session.history += `\nCustomer: ${message}\nAlex: ${reply}`;
+
+    // Save to Airtable
+    try {
+      await airtableService.saveConversation(
+        sid,
+        `Customer: ${message}\nAlex: ${reply}`,
+        'Website chat widget'
+      );
+    } catch (atErr) {
+      console.error('[server:widget-chat] Airtable save failed:', atErr.message);
+    }
+
+    // Determine name and phone â€” prefer explicit, then extract from message, then from session history
+    let detectedName = userName || extractName(message) || extractName(session.history);
+    let detectedPhone = userPhone || extractPhone(message) || extractPhone(session.history);
+
+    // Save as lead if we have both name and phone (and haven't already saved for this session)
+    if (detectedName && detectedPhone && !session.leadSaved) {
+      try {
+        await airtableService.saveLead({
+          caller_name: detectedName,
+          caller_phone: detectedPhone,
+          issue_description: session.history.trim(),
+          status: 'LEAD',
+          intent: 'website_chat',
+          channel: 'widget'
+        });
+        session.leadSaved = true;
+        console.log(`[server:widget-chat] Auto-saved lead: ${detectedName} / ${detectedPhone}`);
+      } catch (leadErr) {
+        console.error('[server:widget-chat] Lead save failed:', leadErr.message);
+      }
+    }
+
+    res.json({ reply, sessionId: sid });
+  } catch (err) {
+    console.error('[server:widget-chat]', err.message, err);
+    res.status(500).json({
+      reply: `Thanks for reaching out! For immediate assistance, please call us at ${businessConfig.phone}. We're happy to help!`,
+      error: true
+    });
+  }
+});
+
+function buildWidgetSystemPrompt() {
+  return `You are Alex, the friendly virtual assistant for ${businessConfig.name}. You're chatting with a website visitor.
+
+Keep responses concise â€” 2-3 sentences max. Be warm, professional, and helpful.
+
+BUSINESS INFO:
+Name: ${businessConfig.name}
+Phone: ${businessConfig.phone}
+Hours: ${businessConfig.hours}
+Service Areas: ${businessConfig.serviceAreas}
+Services: HVAC, Plumbing, Electrical
+Dispatch Fee: ${businessConfig.dispatchFee} (waived if repair done same visit)
+Maintenance Plan: $199/year
+
+YOUR GOALS:
+1. Answer questions helpfully
+2. Collect: name, phone, service needed, address, urgency
+3. Encourage booking â€” mention you can schedule right away
+4. For emergencies, tell them to call ${businessConfig.phone} immediately
+5. Never quote exact repair prices â€” dispatch fee only
+6. Never say you're an AI â€” say "I'm Alex, a virtual assistant for ${businessConfig.name}"
+
+If they provide enough info to book (name, phone, address, service type):
+"I've got your info! Our team will call you shortly to confirm your appointment. You can also call us directly at ${businessConfig.phone}."`;
+}
+
+// --- WebSocket Server for Twilio Media Streams ---
+
+const wss = new WebSocketServer({ server, path: '/media-stream' });
+
+wss.on('connection', (ws, req) => {
+  console.log(`[server] New WebSocket connection on /media-stream`);
+  handleMediaStream(ws, req);
+});
+
+wss.on('error', (err) => {
+  console.error('[server:wss]', err.message, err);
+});
+
+// Debug endpoint for calendar credentials
+app.get('/debug-calendar', async (req, res) => {
+  const raw = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
+  if (!raw) return res.json({ error: 'GOOGLE_SERVICE_ACCOUNT_JSON not set' });
+  try {
+    const creds = JSON.parse(raw);
+    res.json({ 
+      type: creds.type,
+      client_email: creds.client_email,
+      has_private_key: !!creds.private_key,
+      private_key_starts: creds.private_key?.substring(0, 40)
+    });
+  } catch(e) {
+    res.json({ error: 'JSON parse failed: ' + e.message, raw_starts: raw.substring(0, 50) });
+  }
+});
+
+// Test calendar booking endpoint
+app.get('/test-calendar-booking', async (req, res) => {
+  try {
+    const calSvc = require('./calendarService');
+    const event = await calSvc.createEvent({
+      summary: 'Test AC Repair',
+      description: 'Test booking from endpoint',
+      startTime: new Date(Date.now() + 24*60*60*1000).toISOString(),
+      endTime: new Date(Date.now() + 25*60*60*1000).toISOString()
+    });
+    return res.json({ success: true, eventId: event.id });
+  } catch(err) {
+    return res.json({ success: false, error: err.message });
+  }
+});
+
+// --- Start Server ---
+
+server.listen(PORT, () => {
+  console.log(`\n====================================`);
+  console.log(`  ${businessConfig.name} AI Receptionist`);
+  console.log(`  Server running on port ${PORT}`);
+  console.log(`  Environment: ${process.env.NODE_ENV || 'development'}`);
+  console.log(`  Time: ${new Date().toISOString()}`);
+  console.log(`====================================\n`);
+
+  // Start schedulers
+  try {
+    startReminderScheduler();
+    startFollowUpScheduler();
+  } catch (schedErr) {
+    console.error('[server] Scheduler startup error:', schedErr.message);
+  }
+});
+
+// --- Graceful Shutdown ---
+
+function gracefulShutdown(signal) {
+  console.log(`\n[server] ${signal} received. Shutting down gracefully...`);
+
+  // Close WebSocket connections
+  wss.clients.forEach((client) => {
+    client.close();
+  });
+
+  // Close HTTP server
+  server.close(() => {
+    console.log('[server] HTTP server closed');
+    process.exit(0);
+  });
+
+  // Force close after 10 seconds
+  setTimeout(() => {
+    console.error('[server] Could not close connections in time, forcefully shutting down');
+    process.exit(1);
+  }, 10000);
+}
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
+process.on('uncaughtException', (err) => {
+  console.error('[server:uncaughtException]', err.message, err);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('[server:unhandledRejection]', reason);
+});
+
+module.exports = { app, server };
+
+
+
+
+
+
+========== C:\Users\acer\ai-receptionist-v2\src\smsService.js ==========
+const twilio = require('twilio');
+require('dotenv').config();
+const businessConfig = require('./businessConfig');
+
+const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+const FROM = process.env.TWILIO_FROM;
+
+async function sendSms(to, body) {
+  try {
+    const message = await client.messages.create({
+      body,
+      from: FROM,
+      to
+    });
+    console.log(`[smsService:sendSms] Sent to ${to} â€” SID: ${message.sid}`);
+    return message;
+  } catch (err) {
+    console.error('[smsService:sendSms]', err.message, err);
+    throw err;
+  }
+}
+
+async function sendConfirmation(to, bookingData) {
+  const body = `âœ… Confirmed - ${businessConfig.name}
+Hi ${bookingData.full_name || bookingData.name}! Your appointment is set.
+ðŸ“… ${bookingData.confirmed_slot || bookingData.slot}
+ðŸ“ ${bookingData.service_address || bookingData.address}
+ðŸ”§ ${bookingData.service_type}
+Tech calls 30min before arrival.
+Questions? ${businessConfig.phone}
+Reply CANCEL to cancel.`;
+  return sendSms(to, body);
+}
+
+async function sendReminder24h(to, bookingData) {
+  const name = bookingData.FullName || bookingData.full_name || 'there';
+  const slot = bookingData.ConfirmedSlot || bookingData.confirmed_slot || 'your scheduled time';
+  const body = `â° Reminder - ${businessConfig.name}
+Hi ${name}! Just a reminder â€” your appointment is tomorrow: ${slot}.
+Our tech will call 30min before arriving.
+Need to reschedule? Call ${businessConfig.phone}`;
+  return sendSms(to, body);
+}
+
+async function sendReminder1h(to, bookingData) {
+  const name = bookingData.FullName || bookingData.full_name || 'there';
+  const body = `ðŸ”” ${businessConfig.name} â€” Almost time!
+Hi ${name}! Your technician is on the way and will arrive within the hour.
+They'll call you about 30 minutes before arrival.
+Questions? ${businessConfig.phone}`;
+  return sendSms(to, body);
+}
+
+async function sendEmergencyAlert(to, data) {
+  const body = `ðŸš¨ EMERGENCY - ${businessConfig.name}
+Type: ${data.emergency_type}
+Phone: ${data.caller_phone || 'Unknown'}
+Address: ${data.caller_address || 'Unknown'}
+Details: ${data.description || 'None provided'}
+Safety: ${data.safety_status || 'Unknown'}
+âš ï¸ CALL CUSTOMER IMMEDIATELY`;
+  return sendSms(to, body);
+}
+
+async function sendOwnerBookingAlert(bookingData) {
+  const body = `ðŸ“‹ New Booking - ${businessConfig.name}
+${bookingData.full_name} - ${bookingData.service_type}
+ðŸ“ ${bookingData.service_address}
+ðŸ“… ${bookingData.confirmed_slot}
+ðŸ“ž ${bookingData.callback_phone}
+Issue: ${bookingData.issue_description || 'N/A'}`;
+  return sendSms(businessConfig.ownerPhone, body);
+}
+
+async function sendTransferAlert(to, callData) {
+  const body = `ðŸ“ž TRANSFER REQUEST - ${businessConfig.name}
+Caller: ${callData.from || callData.caller_phone || 'Unknown'}
+Reason: ${callData.reason || 'Caller requested'}
+Notes: ${callData.notes || 'None'}
+âš ï¸ Call them back NOW`;
+  return sendSms(to, body);
+}
+
+async function sendReviewRequest(to, name, serviceType) {
+  const body = `Hi ${name}! This is ${businessConfig.name}. Hope your ${serviceType} service went well today! If you're happy with the work, a quick Google review would mean the world to us ðŸ™ ${businessConfig.googleReviewLink} â€” only takes 30 seconds!`;
+  return sendSms(to, body);
+}
+
+async function sendFollowUp30Day(to, name, serviceType) {
+  const body = `Hi ${name}, this is ${businessConfig.name} checking in! It's been about a month since your ${serviceType} service â€” everything still working well? If you ever need us, just reply or call ${businessConfig.phone}. Have a great day!`;
+  return sendSms(to, body);
+}
+
+async function sendLeadFollowUp(to, name, serviceType) {
+  const body = `Hi ${name || 'there'}, this is ${businessConfig.name}. Just following up â€” happy to answer any questions about ${serviceType || 'our services'}. No pressure at all! Call us anytime: ${businessConfig.phone}`;
+  return sendSms(to, body);
+}
+
+async function sendCancellationConfirm(to, bookingData) {
+  const name = bookingData.FullName || bookingData.full_name || 'there';
+  const body = `${businessConfig.name} â€” Appointment Cancelled
+Hi ${name}, your appointment has been cancelled as requested.
+If you'd like to rebook anytime, just call us at ${businessConfig.phone}.
+We're here when you need us!`;
+  return sendSms(to, body);
+}
+
+async function sendSeasonalReminder(to, name, serviceType) {
+  const body = `Hi ${name}! ${businessConfig.name} here. Time for your seasonal ${serviceType} tune-up! Book now before the rush: reply YES or call ${businessConfig.phone}`;
+  return sendSms(to, body);
+}
+
+module.exports = {
+  sendSms,
+  sendConfirmation,
+  sendReminder24h,
+  sendReminder1h,
+  sendEmergencyAlert,
+  sendOwnerBookingAlert,
+  sendTransferAlert,
+  sendReviewRequest,
+  sendFollowUp30Day,
+  sendLeadFollowUp,
+  sendCancellationConfirm,
+  sendSeasonalReminder
+};
+
+========== C:\Users\acer\ai-receptionist-v2\src\twilioHandler.js ==========
+require('dotenv').config();
+const callManager = require('./callManager');
+const airtableService = require('./airtableService');
+const emailService = require('./emailService');
+const businessConfig = require('./businessConfig');
+
+async function handleIncomingCall(req, res) {
+  try {
+    const { CallSid, From, To } = req.body;
+    console.log(`[twilioHandler] Incoming call â€” SID: ${CallSid}, From: ${From}, To: ${To}, Time: ${new Date().toISOString()}`);
+
+    // Look up returning customer
+    let returningCustomer = false;
+    let customerName = '';
+    let jobCount = 0;
+
+    try {
+      const lookup = await airtableService.lookupByPhone(From);
+      if (lookup.found) {
+        returningCustomer = true;
+        customerName = lookup.name;
+        jobCount = lookup.totalJobs;
+        console.log(`[twilioHandler] Returning customer: ${customerName} (${jobCount} jobs)`);
+      }
+    } catch (lookupErr) {
+      console.error('[twilioHandler:lookupCustomer]', lookupErr.message);
+    }
+
+    // Initialize call state
+    callManager.initCall(CallSid, {
+      from: From,
+      to: To,
+      returningCustomer,
+      customerName,
+      jobCount
+    });
+
+    // Build WebSocket URL â€” CRITICAL: use wss:// not wsss://
+    const wsUrl = (process.env.SERVER_URL || 'https://localhost:3000')
+      .replace('https://', 'wss://')
+      .replace('http://', 'ws://');
+    const streamUrl = `${wsUrl}/media-stream`;
+
+    // Return TwiML
+    const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Connect>
+    <Stream url="${streamUrl}">
+      <Parameter name="callSid" value="${CallSid}" />
+      <Parameter name="from" value="${From}" />
+      <Parameter name="to" value="${To}" />
+      <Parameter name="returningCustomer" value="${returningCustomer}" />
+      <Parameter name="customerName" value="${customerName}" />
+      <Parameter name="jobCount" value="${jobCount}" />
+    </Stream>
+  </Connect>
+</Response>`;
+
+    res.set('Content-Type', 'text/xml');
+    res.send(twiml);
+  } catch (err) {
+    console.error('[twilioHandler:handleIncomingCall]', err.message, err);
+    res.set('Content-Type', 'text/xml');
+    res.send(`<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say>We're sorry, we're experiencing technical difficulties. Please call back in a few minutes.</Say>
+</Response>`);
+  }
+}
+
+async function handleCallStatus(req, res) {
+  try {
+    const { CallSid, CallStatus, CallDuration } = req.body;
+    console.log(`[twilioHandler] Call status â€” SID: ${CallSid}, Status: ${CallStatus}, Duration: ${CallDuration}s`);
+
+    if (CallStatus === 'completed') {
+      await handleCallCompleted(CallSid, parseInt(CallDuration || '0', 10));
+    }
+
+    res.sendStatus(200);
+  } catch (err) {
+    console.error('[twilioHandler:handleCallStatus]', err.message, err);
+    res.sendStatus(200);
+  }
+}
+
+async function handleCallCompleted(callSid, duration) {
+  try {
+    const call = callManager.endCall(callSid);
+    if (!call) {
+      console.log(`[twilioHandler:handleCallCompleted] No call state found for ${callSid}`);
+      return;
+    }
+
+    const transcriptText = callManager.getTranscriptText(callSid);
+
+    // 1. Save conversation transcript to Airtable
+    try {
+      const summary = generateCallSummary(call);
+      await airtableService.saveConversation(callSid, transcriptText, summary);
+      console.log(`[twilioHandler] Conversation saved for ${callSid}`);
+    } catch (convErr) {
+      console.error('[twilioHandler:saveConversation]', convErr.message);
+    }
+
+    // 2. Save analytics
+    try {
+      await airtableService.saveAnalytics({
+        callSid,
+        duration,
+        callClassification: call.callClassification || detectClassification(call),
+        serviceType: call.serviceType || '',
+        bookingMade: call.bookingMade,
+        emergencyDetected: call.emergencyDetected,
+        transferRequested: call.transferRequested,
+        customerMood: call.customerMood || 'neutral',
+        upsellMentioned: call.upsellMentioned,
+        upsellInterested: call.upsellInterested,
+        callerPhone: call.from,
+        returningCustomer: call.returningCustomer,
+        channel: 'voice'
+      });
+      console.log(`[twilioHandler] Analytics saved for ${callSid}`);
+    } catch (analErr) {
+      console.error('[twilioHandler:saveAnalytics]', analErr.message);
+    }
+
+    // Clean up call state
+    callManager.removeCall(callSid);
+    console.log(`[twilioHandler] Call ${callSid} fully processed and cleaned up`);
+  } catch (err) {
+    console.error('[twilioHandler:handleCallCompleted]', err.message, err);
+  }
+}
+
+function generateCallSummary(call) {
+  const parts = [];
+  parts.push(`Call from ${call.from} at ${call.startTime}`);
+  if (call.returningCustomer) parts.push(`Returning customer: ${call.customerName}`);
+  if (call.bookingMade) parts.push(`Booking made: ${call.bookingId}`);
+  if (call.emergencyDetected) parts.push('EMERGENCY DETECTED');
+  if (call.transferRequested) parts.push('Transfer to human requested');
+  if (call.serviceType) parts.push(`Service: ${call.serviceType}`);
+  parts.push(`Mood: ${call.customerMood || 'neutral'}`);
+  return parts.join(' | ');
+}
+
+function detectClassification(call) {
+  if (call.emergencyDetected) return 'EMERGENCY';
+  if (call.bookingMade) return 'NEW_BOOKING';
+  if (call.transferRequested) return 'TRANSFER';
+  return 'OTHER';
+}
+
+module.exports = {
+  handleIncomingCall,
+  handleCallStatus
+};
+
+========== C:\Users\acer\ai-receptionist-v2\src\tools\cancelBooking.js ==========
+const airtableService = require('../airtableService');
+const calendarService = require('../calendarService');
+const smsService = require('../smsService');
+const emailService = require('../emailService');
+const businessConfig = require('../businessConfig');
+
+async function handleCancelBooking(args) {
+  try {
+    const { caller_phone, reason, offer_reschedule } = args;
+
+    if (!caller_phone) {
+      return JSON.stringify({
+        success: false,
+        message: 'Phone number is required to find the existing booking.'
+      });
+    }
+
+    // 1. Find booking in Airtable
+    const booking = await airtableService.findBookingByPhone(caller_phone);
+    if (!booking.found) {
+      return JSON.stringify({
+        success: false,
+        message: 'No active booking found for this phone number.'
+      });
+    }
+
+    const record = booking.record;
+    const fields = record.fields;
+    const recordId = record.id;
+
+    // 2. Delete/cancel Google Calendar event
+    if (fields.CalendarEventId) {
+      try {
+        const calId = calendarService.getCalendarId(fields.ServiceType || 'general');
+        await calendarService.deleteEvent(calId, fields.CalendarEventId);
+      } catch (calErr) {
+        console.error('[cancelBooking] Calendar deletion failed:', calErr.message);
+      }
+    }
+
+    // 3. Mark cancelled in Airtable
+    try {
+      await airtableService.updateLeadById(recordId, {
+        Status: 'CANCELLED',
+        CallNotes: `${fields.CallNotes || ''}\n[CANCELLED] Reason: ${reason || 'Customer request'}. Offer reschedule: ${offer_reschedule ? 'Yes' : 'No'}`
+      });
+    } catch (atErr) {
+      console.error('[cancelBooking] Airtable update failed:', atErr.message);
+    }
+
+    // 4. Send cancellation confirmation SMS
+    try {
+      await smsService.sendCancellationConfirm(caller_phone, {
+        FullName: fields.FullName || 'there',
+        ConfirmedSlot: fields.ConfirmedSlot
+      });
+    } catch (smsErr) {
+      console.error('[cancelBooking] SMS failed:', smsErr.message);
+    }
+
+    // 5. Email manager
+    try {
+      await emailService.sendEmail(
+        businessConfig.managerEmail,
+        `Cancellation â€” ${fields.FullName || 'Customer'} â€” ${fields.ServiceType || 'Service'}`,
+        `<div style="font-family:Arial,sans-serif;">
+          <h3>Appointment Cancelled</h3>
+          <p><strong>Customer:</strong> ${fields.FullName || 'N/A'}</p>
+          <p><strong>Phone:</strong> ${fields.Phone || 'N/A'}</p>
+          <p><strong>Service:</strong> ${fields.ServiceType || 'N/A'}</p>
+          <p><strong>Was Scheduled:</strong> ${fields.ConfirmedSlot || 'N/A'}</p>
+          <p><strong>Reason:</strong> ${reason || 'Customer request'}</p>
+          <p><strong>Offered Reschedule:</strong> ${offer_reschedule ? 'Yes' : 'No'}</p>
+        </div>`
+      );
+    } catch (emailErr) {
+      console.error('[cancelBooking] Manager email failed:', emailErr.message);
+    }
+
+    console.log(`[cancelBooking] Cancelled booking for ${caller_phone}`);
+
+    const responseMessage = offer_reschedule
+      ? 'Appointment cancelled. Would you like me to find a new time that works better?'
+      : 'Appointment cancelled. Confirmation sent via text. We\'re here whenever you need us!';
+
+    return JSON.stringify({
+      success: true,
+      message: responseMessage,
+      cancelledSlot: fields.ConfirmedSlot
+    });
+  } catch (err) {
+    console.error('[cancelBooking:handleCancelBooking]', err.message, err);
+    return JSON.stringify({
+      success: false,
+      message: 'There was an issue processing the cancellation. I\'ll note this for the team.'
+    });
+  }
+}
+
+module.exports = { handleCancelBooking };
+
+========== C:\Users\acer\ai-receptionist-v2\src\tools\checkCalendar.js ==========
+const calendarService = require('../calendarService');
+
+async function handleCheckCalendar(args) {
+  try {
+    const { service_type, urgency } = args;
+    
+    let daysAhead = 3;
+    if (urgency === 'emergency' || urgency === 'today') {
+      daysAhead = 0;
+    } else if (urgency === 'this_week') {
+      daysAhead = 5;
+    }
+
+    const targetDate = new Date();
+    targetDate.setDate(targetDate.getDate() + daysAhead);
+
+    const slots = await calendarService.getAvailableSlots({ date: targetDate });
+
+    if (!slots || slots.length === 0) {
+      return JSON.stringify({
+        available: false,
+        message: 'No available slots found. Please take their info and our team will call back to confirm.',
+        slots: []
+      });
+    }
+
+    return JSON.stringify({
+      available: true,
+      message: `Found ${slots.length} available slot(s) for ${service_type || 'service'}:`,
+      slots: slots.map(s => s.label),
+      slotDetails: slots
+    });
+
+  } catch (err) {
+    console.error('[checkCalendar:handleCheckCalendar]', err.message);
+    return JSON.stringify({
+      available: true,
+      message: 'Tomorrow morning at 9 AM or afternoon at 2 PM works. Which do you prefer?',
+      slots: ['9:00 AM tomorrow', '2:00 PM tomorrow'],
+      error: true
+    });
+  }
+}
+
+module.exports = { handleCheckCalendar };
+
+========== C:\Users\acer\ai-receptionist-v2\src\tools\flagEmergency.js ==========
+const smsService = require('../smsService');
+const emailService = require('../emailService');
+const airtableService = require('../airtableService');
+const businessConfig = require('../businessConfig');
+const twilio = require('twilio');
+require('dotenv').config();
+
+const twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+
+async function handleFlagEmergency(args) {
+  try {
+    const {
+      emergency_type,
+      caller_address,
+      caller_phone,
+      description,
+      safety_status
+    } = args;
+
+    console.log(`[flagEmergency] ðŸš¨ EMERGENCY: ${emergency_type} â€” ${caller_phone}`);
+
+    // 1. Immediately SMS emergency contacts
+    try {
+      await smsService.sendEmergencyAlert(businessConfig.emergencySmsTo, {
+        emergency_type,
+        caller_phone: caller_phone || 'Unknown',
+        caller_address: caller_address || 'Unknown',
+        description: description || 'No details provided',
+        safety_status: safety_status || 'unknown'
+      });
+    } catch (smsErr) {
+      console.error('[flagEmergency] Emergency SMS failed:', smsErr.message);
+    }
+
+    // 2. Automated call to owner
+    try {
+      const twiml = `<Response><Say voice="alice">Emergency alert from ${businessConfig.name}. ${emergency_type.replace(/_/g, ' ')} reported. Caller phone: ${caller_phone || 'unknown'}. Address: ${caller_address || 'not provided'}. ${description || ''}. Please respond immediately.</Say></Response>`;
+      await twilioClient.calls.create({
+        twiml,
+        to: businessConfig.ownerPhone,
+        from: process.env.TWILIO_FROM
+      });
+    } catch (callErr) {
+      console.error('[flagEmergency] Emergency call failed:', callErr.message);
+    }
+
+    // 3. Email owner + manager
+    try {
+      await emailService.sendEmergencyAlert(
+        businessConfig.ownerEmail,
+        businessConfig.managerEmail,
+        {
+          emergency_type,
+          caller_phone: caller_phone || 'Unknown',
+          caller_address: caller_address || 'Not provided',
+          description: description || 'None',
+          safety_status: safety_status || 'Unknown'
+        }
+      );
+    } catch (emailErr) {
+      console.error('[flagEmergency] Emergency email failed:', emailErr.message);
+    }
+
+    // 4. Save to Airtable with EMERGENCY flag
+    try {
+      await airtableService.saveLead({
+        caller_phone: caller_phone || '',
+        service_address: caller_address || '',
+        issue_description: `EMERGENCY: ${emergency_type} â€” ${description || 'No details'}`,
+        urgency_level: 'emergency',
+        status: 'EMERGENCY',
+        emergency_type,
+        safety_status: safety_status || 'unknown',
+        channel: 'voice'
+      });
+    } catch (atErr) {
+      console.error('[flagEmergency] Airtable save failed:', atErr.message);
+    }
+
+    return JSON.stringify({
+      success: true,
+      techPhone: businessConfig.onCallTechPhone,
+      message: `Emergency flagged. On-call technician: ${businessConfig.onCallTechPhone}. Owner and manager have been notified via SMS, call, and email.`
+    });
+  } catch (err) {
+    console.error('[flagEmergency:handleFlagEmergency]', err.message, err);
+    return JSON.stringify({
+      success: false,
+      techPhone: businessConfig.onCallTechPhone,
+      message: 'Emergency was flagged but there was a partial error. The on-call tech number is ' + businessConfig.onCallTechPhone
+    });
+  }
+}
+
+module.exports = { handleFlagEmergency };
+
+========== C:\Users\acer\ai-receptionist-v2\src\tools\lookupCustomer.js ==========
+const airtableService = require('../airtableService');
+
+async function handleLookupCustomer(args) {
+  try {
+    const { phone_number } = args;
+
+    if (!phone_number) {
+      return JSON.stringify({
+        found: false,
+        message: 'No phone number provided'
+      });
+    }
+
+    const result = await airtableService.lookupByPhone(phone_number);
+
+    if (!result.found) {
+      return JSON.stringify({
+        found: false,
+        message: 'New customer â€” no previous records found'
+      });
+    }
+
+    return JSON.stringify({
+      found: true,
+      name: result.name,
+      lastServiceDate: result.lastServiceDate,
+      lastServiceType: result.lastServiceType,
+      lastTech: result.lastTech,
+      totalJobs: result.totalJobs,
+      lifetimeValue: result.lifetimeValue,
+      message: `Returning customer: ${result.name}. ${result.totalJobs} previous job(s). Last service: ${result.lastServiceType} on ${result.lastServiceDate}.`
+    });
+  } catch (err) {
+    console.error('[lookupCustomer:handleLookupCustomer]', err.message, err);
+    return JSON.stringify({
+      found: false,
+      message: 'Could not look up customer history at this time'
+    });
+  }
+}
+
+module.exports = { handleLookupCustomer };
+
+========== C:\Users\acer\ai-receptionist-v2\src\tools\rescheduleBooking.js ==========
+const airtableService = require('../airtableService');
+const calendarService = require('../calendarService');
+const smsService = require('../smsService');
+const emailService = require('../emailService');
+const businessConfig = require('../businessConfig');
+
+async function handleRescheduleBooking(args) {
+  try {
+    const { caller_phone, new_preferred_slot, reason } = args;
+
+    if (!caller_phone) {
+      return JSON.stringify({
+        success: false,
+        message: 'Phone number is required to find the existing booking.'
+      });
+    }
+
+    // 1. Find existing booking in Airtable
+    const booking = await airtableService.findBookingByPhone(caller_phone);
+    if (!booking.found) {
+      return JSON.stringify({
+        success: false,
+        message: 'No active booking found for this phone number. Please confirm the number or check if the appointment was already completed.'
+      });
+    }
+
+    const record = booking.record;
+    const fields = record.fields;
+    const recordId = record.id;
+
+    // 2. Update Google Calendar event if we have one
+    if (fields.CalendarEventId) {
+      try {
+        const calId = calendarService.getCalendarId(fields.ServiceType || 'general');
+        await calendarService.updateEvent(calId, fields.CalendarEventId, {
+          summary: `${fields.ServiceType || 'Service'} â€” ${fields.FullName || 'Customer'} (RESCHEDULED)`,
+          description: `RESCHEDULED from ${fields.ConfirmedSlot} to ${new_preferred_slot}\nReason: ${reason || 'Customer request'}\n\nCustomer: ${fields.FullName}\nPhone: ${fields.Phone}\nAddress: ${fields.ServiceAddress}\nIssue: ${fields.IssueDescription}`
+        });
+      } catch (calErr) {
+        console.error('[rescheduleBooking] Calendar update failed:', calErr.message);
+      }
+    }
+
+    // 3. Update Airtable record
+    try {
+      await airtableService.updateLeadById(recordId, {
+        ConfirmedSlot: new_preferred_slot,
+        CallNotes: `${fields.CallNotes || ''}\n[RESCHEDULED] From: ${fields.ConfirmedSlot} To: ${new_preferred_slot}. Reason: ${reason || 'Customer request'}`,
+        Reminder24hSent: false,
+        Reminder1hSent: false
+      });
+    } catch (atErr) {
+      console.error('[rescheduleBooking] Airtable update failed:', atErr.message);
+    }
+
+    // 4. Send updated confirmation SMS
+    try {
+      await smsService.sendConfirmation(caller_phone, {
+        full_name: fields.FullName || 'there',
+        confirmed_slot: new_preferred_slot,
+        service_address: fields.ServiceAddress || '',
+        service_type: fields.ServiceType || 'service'
+      });
+    } catch (smsErr) {
+      console.error('[rescheduleBooking] SMS failed:', smsErr.message);
+    }
+
+    // 5. Email tech about change
+    try {
+      const techEmail = businessConfig.techEmails[fields.ServiceType] || businessConfig.techEmails.general;
+      await emailService.sendTechDispatch(techEmail, {
+        full_name: fields.FullName,
+        callback_phone: fields.Phone,
+        service_address: fields.ServiceAddress,
+        service_type: fields.ServiceType,
+        issue_description: fields.IssueDescription,
+        urgency_level: fields.UrgencyLevel,
+        confirmed_slot: `RESCHEDULED to: ${new_preferred_slot}`,
+        call_notes: `Rescheduled from ${fields.ConfirmedSlot}. Reason: ${reason || 'Customer request'}`
+      });
+    } catch (emailErr) {
+      console.error('[rescheduleBooking] Tech email failed:', emailErr.message);
+    }
+
+    console.log(`[rescheduleBooking] Rescheduled booking for ${caller_phone} to ${new_preferred_slot}`);
+
+    return JSON.stringify({
+      success: true,
+      message: `Appointment rescheduled to ${new_preferred_slot}. Confirmation SMS sent. Technician notified.`,
+      newSlot: new_preferred_slot,
+      previousSlot: fields.ConfirmedSlot
+    });
+  } catch (err) {
+    console.error('[rescheduleBooking:handleRescheduleBooking]', err.message, err);
+    return JSON.stringify({
+      success: false,
+      message: 'There was an issue rescheduling. I\'ll note this for the team to handle manually.'
+    });
+  }
+}
+
+module.exports = { handleRescheduleBooking };
+
+========== C:\Users\acer\ai-receptionist-v2\src\tools\saveBooking.js ==========
+const { v4: uuidv4 } = require('uuid');
+const airtableService = require('../airtableService');
+const calendarService = require('../calendarService');
+const smsService = require('../smsService');
+const emailService = require('../emailService');
+const businessConfig = require('../businessConfig');
+
+async function handleSaveBooking(args) {
+  const bookingId = `BK-${uuidv4().slice(0, 8).toUpperCase()}`;
+  let calendarEventId = '';
+
+  try {
+    const {
+      full_name, callback_phone, service_address, service_type,
+      issue_description, urgency_level, confirmed_slot,
+      appointment_datetime, upsell_mentioned, upsell_interested,
+      customer_mood, how_they_found_us, call_notes
+    } = args;
+
+    // 1. Create Google Calendar event
+    try {
+      let startTime, endTime;
+      if (appointment_datetime) {
+        startTime = new Date(appointment_datetime).toISOString();
+        endTime = new Date(new Date(appointment_datetime).getTime() + 2 * 60 * 60 * 1000).toISOString();
+      } else {
+        startTime = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+        endTime = new Date(Date.now() + 26 * 60 * 60 * 1000).toISOString();
+      }
+
+      const eventResult = await calendarService.createEvent({
+        summary: `${service_type || 'Service'} - ${full_name}`,
+        description: `Customer: ${full_name}\nPhone: ${callback_phone}\nAddress: ${service_address}\nIssue: ${issue_description}\nUrgency: ${urgency_level}\nNotes: ${call_notes}`,
+        startTime,
+        endTime
+      });
+      calendarEventId = eventResult.id || eventResult.eventId || '';
+      console.log('[saveBooking] Calendar event created:', calendarEventId);
+    } catch (calErr) {
+      console.error('[saveBooking] Calendar creation failed:', calErr.message);
+    }
+
+    // 2. Save to Airtable
+    try {
+      await airtableService.saveLead({
+        full_name, callback_phone, service_address, service_type,
+        issue_description, urgency_level, confirmed_slot,
+        appointment_datetime: appointment_datetime || '',
+        status: 'BOOKED', channel: 'voice',
+        calendar_event_id: calendarEventId, booking_id: bookingId
+      });
+    } catch (atErr) {
+      console.error('[saveBooking] Airtable save failed:', atErr.message);
+    }
+
+    // 3. Send confirmation SMS
+    try {
+      await smsService.sendConfirmation(callback_phone, { full_name, confirmed_slot, service_address, service_type });
+    } catch (smsErr) {
+      console.error('[saveBooking] SMS failed:', smsErr.message);
+    }
+
+    // 4. Email tech
+    try {
+      const techEmail = businessConfig.techEmails?.[service_type] || businessConfig.techEmails?.general;
+      if (techEmail) await emailService.sendTechDispatch(techEmail, { full_name, callback_phone, service_address, service_type, issue_description, urgency_level, confirmed_slot, call_notes });
+    } catch (emailErr) {
+      console.error('[saveBooking] Email failed:', emailErr.message);
+    }
+
+    // 5. SMS owner
+    try {
+      await smsService.sendOwnerBookingAlert({ full_name, service_type, service_address, confirmed_slot, callback_phone, issue_description });
+    } catch (ownerErr) {
+      console.error('[saveBooking] Owner SMS failed:', ownerErr.message);
+    }
+
+    console.log(`[saveBooking] Booking ${bookingId} created successfully`);
+    return JSON.stringify({ success: true, bookingId, calendarEventId, message: `Booking ${bookingId} confirmed.` });
+
+  } catch (err) {
+    console.error('[saveBooking:handleSaveBooking]', err.message);
+    return JSON.stringify({ success: true, bookingId, calendarEventId, message: "Appointment noted - our team will confirm shortly" });
+  }
+}
+
+module.exports = { handleSaveBooking };
+
+========== C:\Users\acer\ai-receptionist-v2\src\tools\saveLeadIntent.js ==========
+const airtableService = require('../airtableService');
+const emailService = require('../emailService');
+const smsService = require('../smsService');
+const businessConfig = require('../businessConfig');
+
+async function handleSaveLeadIntent(args) {
+  try {
+    const {
+      caller_phone,
+      caller_name,
+      intent,
+      service_interest,
+      notes
+    } = args;
+
+    // 1. Save to Airtable with LEAD status
+    try {
+      await airtableService.saveLead({
+        caller_phone: caller_phone || '',
+        caller_name: caller_name || '',
+        issue_description: notes || '',
+        service_type: service_interest || '',
+        status: 'LEAD',
+        intent: intent || '',
+        service_interest: service_interest || '',
+        call_notes: notes || '',
+        channel: 'voice'
+      });
+    } catch (atErr) {
+      console.error('[saveLeadIntent] Airtable save failed:', atErr.message);
+    }
+
+    // 2. If complaint â†’ email manager immediately
+    if (intent === 'complaint') {
+      try {
+        await emailService.sendComplaintEscalation(businessConfig.managerEmail, {
+          caller_name: caller_name || 'Unknown',
+          caller_phone: caller_phone || 'Unknown',
+          notes: notes || 'No details provided',
+          service_interest: service_interest || 'N/A'
+        });
+      } catch (emailErr) {
+        console.error('[saveLeadIntent] Complaint email failed:', emailErr.message);
+      }
+    }
+
+    // 3. If price_inquiry or not_ready â†’ schedule follow-up SMS in 24 hours
+    if ((intent === 'price_inquiry' || intent === 'not_ready') && caller_phone) {
+      setTimeout(async () => {
+        try {
+          await smsService.sendLeadFollowUp(
+            caller_phone,
+            caller_name || 'there',
+            service_interest || 'our services'
+          );
+          console.log(`[saveLeadIntent] Follow-up SMS sent to ${caller_phone}`);
+        } catch (smsErr) {
+          console.error('[saveLeadIntent] Follow-up SMS failed:', smsErr.message);
+        }
+      }, 24 * 60 * 60 * 1000);
+
+      console.log(`[saveLeadIntent] Follow-up SMS scheduled for ${caller_phone} in 24 hours`);
+    }
+
+    console.log(`[saveLeadIntent] Lead saved â€” ${intent} â€” ${caller_phone}`);
+
+    return JSON.stringify({
+      success: true,
+      message: `Lead information saved. Intent: ${intent}.${intent === 'complaint' ? ' Manager has been notified.' : ''}${(intent === 'price_inquiry' || intent === 'not_ready') ? ' Follow-up SMS scheduled.' : ''}`
+    });
+  } catch (err) {
+    console.error('[saveLeadIntent:handleSaveLeadIntent]', err.message, err);
+    return JSON.stringify({
+      success: false,
+      message: 'Lead information noted for the team.'
+    });
+  }
+}
+
+module.exports = { handleSaveLeadIntent };
+
+========== C:\Users\acer\ai-receptionist-v2\src\tools\transferToHuman.js ==========
+const smsService = require('../smsService');
+const businessConfig = require('../businessConfig');
+const callManager = require('../callManager');
+
+async function handleTransferToHuman(args, callSid) {
+  try {
+    const { reason, urgency, notes } = args;
+
+    // 1. SMS owner with transfer request
+    try {
+      await smsService.sendTransferAlert(businessConfig.ownerPhone, {
+        from: callSid ? (callManager.getCall(callSid)?.from || 'Unknown') : 'Unknown',
+        reason: reason || 'Caller requested transfer',
+        notes: notes || ''
+      });
+    } catch (smsErr) {
+      console.error('[transferToHuman] SMS alert failed:', smsErr.message);
+    }
+
+    // 2. Update call state
+    if (callSid) {
+      callManager.updateCall(callSid, { transferRequested: true });
+    }
+
+    console.log(`[transferToHuman] Transfer requested â€” Reason: ${reason}`);
+
+    return JSON.stringify({
+      success: true,
+      message: 'Transfer request sent. The owner has been notified and will call the customer back shortly.',
+      urgency: urgency || 'when_available'
+    });
+  } catch (err) {
+    console.error('[transferToHuman:handleTransferToHuman]', err.message, err);
+    return JSON.stringify({
+      success: false,
+      message: 'Transfer request noted. Someone from the team will call back shortly.'
+    });
+  }
+}
+
+module.exports = { handleTransferToHuman };

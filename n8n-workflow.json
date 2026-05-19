@@ -1,0 +1,715 @@
+{
+  "name": "AI Receptionist - SMS & WhatsApp Handler",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ai-receptionist",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-trigger",
+      "name": "Webhook Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [220, 300],
+      "webhookId": "ai-receptionist-webhook"
+    },
+    {
+      "parameters": {
+        "mode": "manual",
+        "duplicateItem": false,
+        "assignments": {
+          "assignments": [
+            {
+              "id": "set-message",
+              "name": "message",
+              "value": "={{ $json.body.Body || $json.body.message || $json.body.SpeechResult || '' }}",
+              "type": "string"
+            },
+            {
+              "id": "set-from",
+              "name": "from",
+              "value": "={{ $json.body.From || $json.body.from || '' }}",
+              "type": "string"
+            },
+            {
+              "id": "set-channel",
+              "name": "channel",
+              "value": "={{ $json.body.ProfileName ? 'whatsapp' : ($json.body.SpeechResult ? 'voice' : 'sms') }}",
+              "type": "string"
+            },
+            {
+              "id": "set-conversationId",
+              "name": "conversationId",
+              "value": "={{ $json.body.From || $json.body.from || 'unknown' }}-{{ Date.now() }}",
+              "type": "string"
+            },
+            {
+              "id": "set-businessId",
+              "name": "businessId",
+              "value": "default",
+              "type": "string"
+            },
+            {
+              "id": "set-messageSid",
+              "name": "messageSid",
+              "value": "={{ $json.body.MessageSid || $json.body.CallSid || '' }}",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "normalize-input",
+      "name": "Normalize Input",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [440, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "check-empty-message",
+              "leftValue": "={{ $json.message }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "validate-input",
+      "name": "Validate Input",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [660, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://api.airtable.com/v0/{{ $env.AIRTABLE_BASE_ID }}/ConversationHistory",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "filterByFormula",
+              "value": "=SEARCH('{{ $json.from }}', {CallSid})"
+            },
+            {
+              "name": "maxRecords",
+              "value": "5"
+            },
+            {
+              "name": "sort[0][field]",
+              "value": "CreatedAt"
+            },
+            {
+              "name": "sort[0][direction]",
+              "value": "desc"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "load-memory",
+      "name": "Load Conversation Memory",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [880, 200],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "airtable-auth",
+          "name": "Airtable API Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://api.airtable.com/v0/{{ $env.AIRTABLE_BASE_ID }}/Businesses",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "filterByFormula",
+              "value": "{BusinessId}='default'"
+            },
+            {
+              "name": "maxRecords",
+              "value": "1"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "load-business-config",
+      "name": "Load Business Config",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [880, 400],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "airtable-auth",
+          "name": "Airtable API Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "manual",
+        "duplicateItem": false,
+        "assignments": {
+          "assignments": [
+            {
+              "id": "set-memory-context",
+              "name": "memoryContext",
+              "value": "={{ $('Load Conversation Memory').item.json.records ? $('Load Conversation Memory').item.json.records.map(r => r.fields.Transcript || '').filter(t => t).join('\\n---\\n') : 'No previous conversation history.' }}",
+              "type": "string"
+            },
+            {
+              "id": "set-business-name",
+              "name": "businessName",
+              "value": "={{ $('Load Business Config').item.json.records && $('Load Business Config').item.json.records[0] ? $('Load Business Config').item.json.records[0].fields.Name : $env.BUSINESS_NAME || 'Premier HVAC & Plumbing' }}",
+              "type": "string"
+            },
+            {
+              "id": "set-business-phone",
+              "name": "businessPhone",
+              "value": "={{ $('Load Business Config').item.json.records && $('Load Business Config').item.json.records[0] ? $('Load Business Config').item.json.records[0].fields.Phone : $env.BUSINESS_PHONE || '' }}",
+              "type": "string"
+            },
+            {
+              "id": "set-dispatch-fee",
+              "name": "dispatchFee",
+              "value": "={{ $('Load Business Config').item.json.records && $('Load Business Config').item.json.records[0] ? $('Load Business Config').item.json.records[0].fields.DispatchFee : '$89' }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "merge-context",
+      "name": "Merge Context",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [1100, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"gpt-4o-mini\",\n  \"temperature\": 0.7,\n  \"max_tokens\": 800,\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You are Alex, the professional virtual assistant for {{ $json.businessName }}. You are handling a text conversation (SMS/WhatsApp).\\n\\nPERSONALITY: Warm, professional, concise. 2-3 sentences max. Never say you're an AI — say you're Alex, a virtual assistant.\\n\\nBUSINESS INFO:\\nName: {{ $json.businessName }}\\nPhone: {{ $json.businessPhone }}\\nDispatch Fee: {{ $json.dispatchFee }} (waived if repair completed same visit)\\nServices: HVAC, Plumbing, Electrical\\nMaintenance Plan: $199/year\\n\\nRULES:\\n- Never quote exact repair prices\\n- Collect: name, phone, address, service type, issue description, urgency\\n- For emergencies: tell them to call {{ $json.businessPhone }} immediately\\n- Use sales language for price inquiries\\n- For complaints: empathize and escalate\\n\\nPREVIOUS CONTEXT:\\n{{ $json.memoryContext }}\\n\\nRESPOND IN THIS EXACT JSON FORMAT:\\n{\\n  \\\"reply\\\": \\\"your message to the customer\\\",\\n  \\\"state\\\": \\\"NEW_BOOKING|EMERGENCY|RESCHEDULE|CANCELLATION|COMPLAINT|FAQ_ONLY|FOLLOW_UP|OTHER\\\",\\n  \\\"bookingData\\\": {\\n    \\\"name\\\": \\\"\\\",\\n    \\\"phone\\\": \\\"\\\",\\n    \\\"address\\\": \\\"\\\",\\n    \\\"serviceType\\\": \\\"\\\",\\n    \\\"issue\\\": \\\"\\\",\\n    \\\"urgency\\\": \\\"\\\"\\n  }\\n}\\n\\nONLY populate bookingData when you have enough info to save a booking. Always include reply and state.\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"From: {{ $('Normalize Input').item.json.from }}\\nChannel: {{ $('Normalize Input').item.json.channel }}\\nMessage: {{ $('Normalize Input').item.json.message }}\"\n    }\n  ]\n}",
+        "options": {}
+      },
+      "id": "ai-brain",
+      "name": "AI Brain - OpenAI",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1320, 300],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "openai-auth",
+          "name": "OpenAI API Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const aiResponse = $input.first().json;\nlet content = '';\n\ntry {\n  content = aiResponse.choices[0].message.content;\n} catch (e) {\n  return [{ json: { reply: 'Thanks for reaching out! Please call us for immediate assistance.', state: 'OTHER', bookingData: null, parseError: true } }];\n}\n\nlet parsed;\ntry {\n  // Try to extract JSON from the response\n  const jsonMatch = content.match(/\\{[\\s\\S]*\\}/);\n  if (jsonMatch) {\n    parsed = JSON.parse(jsonMatch[0]);\n  } else {\n    parsed = { reply: content, state: 'OTHER', bookingData: null };\n  }\n} catch (e) {\n  parsed = { reply: content, state: 'OTHER', bookingData: null };\n}\n\nconst reply = parsed.reply || content || 'Thanks for your message! We\\'ll get back to you shortly.';\nconst state = parsed.state || 'OTHER';\nconst bookingData = parsed.bookingData || null;\n\nconst hasBookingData = bookingData && bookingData.name && bookingData.phone && bookingData.address && bookingData.serviceType;\n\nreturn [{\n  json: {\n    reply,\n    state,\n    bookingData: hasBookingData ? bookingData : null,\n    hasBookingData: !!hasBookingData,\n    from: $('Normalize Input').item.json.from,\n    channel: $('Normalize Input').item.json.channel,\n    conversationId: $('Normalize Input').item.json.conversationId,\n    message: $('Normalize Input').item.json.message,\n    businessName: $('Merge Context').item.json.businessName\n  }\n}];"
+      },
+      "id": "parse-classify",
+      "name": "Parse & Classify Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1540, 300]
+    },
+    {
+      "parameters": {
+        "mode": "rules",
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": { "caseSensitive": false, "leftValue": "", "typeValidation": "loose" },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.state }}",
+                    "rightValue": "NEW_BOOKING",
+                    "operator": { "type": "string", "operation": "equals" }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputLabel": "New Booking"
+            },
+            {
+              "conditions": {
+                "options": { "caseSensitive": false, "leftValue": "", "typeValidation": "loose" },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.state }}",
+                    "rightValue": "EMERGENCY",
+                    "operator": { "type": "string", "operation": "equals" }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputLabel": "Emergency"
+            },
+            {
+              "conditions": {
+                "options": { "caseSensitive": false, "leftValue": "", "typeValidation": "loose" },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.state }}",
+                    "rightValue": "COMPLAINT",
+                    "operator": { "type": "string", "operation": "equals" }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputLabel": "Complaint"
+            },
+            {
+              "conditions": {
+                "options": { "caseSensitive": false, "leftValue": "", "typeValidation": "loose" },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.state }}",
+                    "rightValue": "CANCELLATION",
+                    "operator": { "type": "string", "operation": "equals" }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputLabel": "Cancellation"
+            }
+          ],
+          "fallbackOutput": {
+            "renameOutput": true,
+            "outputLabel": "Default (FAQ/Other)"
+          }
+        },
+        "options": {}
+      },
+      "id": "state-router",
+      "name": "State Router",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [1760, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.airtable.com/v0/{{ $env.AIRTABLE_BASE_ID }}/Leads",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"fields\": {\n    \"FullName\": \"{{ $json.bookingData ? $json.bookingData.name : '' }}\",\n    \"Phone\": \"{{ $json.from }}\",\n    \"ServiceAddress\": \"{{ $json.bookingData ? $json.bookingData.address : '' }}\",\n    \"ServiceType\": \"{{ $json.bookingData ? $json.bookingData.serviceType : '' }}\",\n    \"IssueDescription\": \"{{ $json.bookingData ? $json.bookingData.issue : $json.message }}\",\n    \"UrgencyLevel\": \"{{ $json.bookingData ? $json.bookingData.urgency : 'flexible' }}\",\n    \"Status\": \"BOOKED\",\n    \"Channel\": \"{{ $json.channel }}\",\n    \"CreatedAt\": \"{{ new Date().toISOString() }}\"\n  }\n}",
+        "options": {}
+      },
+      "id": "save-booking-airtable",
+      "name": "Save Booking to Airtable",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2000, 100],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "airtable-auth",
+          "name": "Airtable API Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.airtable.com/v0/{{ $env.AIRTABLE_BASE_ID }}/Leads",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"fields\": {\n    \"Phone\": \"{{ $json.from }}\",\n    \"IssueDescription\": \"EMERGENCY: {{ $json.message }}\",\n    \"UrgencyLevel\": \"emergency\",\n    \"Status\": \"EMERGENCY\",\n    \"Channel\": \"{{ $json.channel }}\",\n    \"CreatedAt\": \"{{ new Date().toISOString() }}\"\n  }\n}",
+        "options": {}
+      },
+      "id": "save-emergency-airtable",
+      "name": "Save Emergency to Airtable",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2000, 260],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "airtable-auth",
+          "name": "Airtable API Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.airtable.com/v0/{{ $env.AIRTABLE_BASE_ID }}/Leads",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"fields\": {\n    \"Phone\": \"{{ $json.from }}\",\n    \"IssueDescription\": \"COMPLAINT: {{ $json.message }}\",\n    \"Status\": \"COMPLAINT\",\n    \"Intent\": \"complaint\",\n    \"Channel\": \"{{ $json.channel }}\",\n    \"CreatedAt\": \"{{ new Date().toISOString() }}\"\n  }\n}",
+        "options": {}
+      },
+      "id": "save-complaint-airtable",
+      "name": "Save Complaint to Airtable",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2000, 420],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "airtable-auth",
+          "name": "Airtable API Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.airtable.com/v0/{{ $env.AIRTABLE_BASE_ID }}/ConversationHistory",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"fields\": {\n    \"CallSid\": \"{{ $json.conversationId || $json.from + '-' + Date.now() }}\",\n    \"Transcript\": \"Customer ({{ $json.from }}): {{ $json.message }}\\nAlex: {{ $json.reply }}\",\n    \"Summary\": \"{{ $json.channel }} conversation — State: {{ $json.state }}\",\n    \"CreatedAt\": \"{{ new Date().toISOString() }}\"\n  }\n}",
+        "options": {}
+      },
+      "id": "save-conversation",
+      "name": "Save Conversation",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2220, 560],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "airtable-auth",
+          "name": "Airtable API Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"gpt-4o-mini\",\n  \"temperature\": 0.3,\n  \"max_tokens\": 300,\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"Analyze this customer interaction and extract: sentiment (positive/neutral/negative), primary_issue, service_type, revenue_opportunity (high/medium/low/none), follow_up_needed (true/false). Respond in JSON only.\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"Customer message: {{ $json.message }}\\nAI response: {{ $json.reply }}\\nClassification: {{ $json.state }}\"\n    }\n  ]\n}",
+        "options": {}
+      },
+      "id": "analytics-ai",
+      "name": "Analytics - Post Intelligence",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2440, 560],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "openai-auth",
+          "name": "OpenAI API Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.airtable.com/v0/{{ $env.AIRTABLE_BASE_ID }}/ConversationAnalytics",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"fields\": {\n    \"CallSid\": \"{{ $('Parse & Classify Response').item.json.conversationId || '' }}\",\n    \"CallClassification\": \"{{ $('Parse & Classify Response').item.json.state || 'OTHER' }}\",\n    \"CallerPhone\": \"{{ $('Parse & Classify Response').item.json.from || '' }}\",\n    \"Channel\": \"{{ $('Parse & Classify Response').item.json.channel || 'sms' }}\",\n    \"BookingMade\": {{ $('Parse & Classify Response').item.json.state === 'NEW_BOOKING' }},\n    \"EmergencyDetected\": {{ $('Parse & Classify Response').item.json.state === 'EMERGENCY' }},\n    \"CreatedAt\": \"{{ new Date().toISOString() }}\"\n  }\n}",
+        "options": {}
+      },
+      "id": "save-analytics",
+      "name": "Save Analytics",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2660, 560],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "airtable-auth",
+          "name": "Airtable API Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": false, "leftValue": "", "typeValidation": "loose" },
+          "conditions": [
+            {
+              "id": "check-voice",
+              "leftValue": "={{ $('Normalize Input').item.json.channel }}",
+              "rightValue": "voice",
+              "operator": { "type": "string", "operation": "equals" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "output-router",
+      "name": "Output Router",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [2220, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "=<?xml version=\"1.0\" encoding=\"UTF-8\"?><Response><Say voice=\"alice\">{{ $('Parse & Classify Response').item.json.reply }}</Say></Response>",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "text/xml"
+              }
+            ]
+          }
+        }
+      },
+      "id": "voice-response",
+      "name": "Voice TwiML Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [2440, 200]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ reply: $('Parse & Classify Response').item.json.reply, state: $('Parse & Classify Response').item.json.state, from: $('Parse & Classify Response').item.json.from }) }}",
+        "options": {}
+      },
+      "id": "sms-response",
+      "name": "SMS/WhatsApp JSON Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [2440, 380]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ error: 'Empty message received', reply: 'Please send a message and we will be happy to help!' }) }}",
+        "options": {
+          "responseCode": 400
+        }
+      },
+      "id": "empty-message-response",
+      "name": "Empty Message Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [880, 500]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.airtable.com/v0/{{ $env.AIRTABLE_BASE_ID }}/Leads",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"fields\": {\n    \"Phone\": \"{{ $json.from }}\",\n    \"IssueDescription\": \"CANCELLATION REQUEST: {{ $json.message }}\",\n    \"Status\": \"CANCELLED\",\n    \"Channel\": \"{{ $json.channel }}\",\n    \"CreatedAt\": \"{{ new Date().toISOString() }}\"\n  }\n}",
+        "options": {}
+      },
+      "id": "save-cancellation-airtable",
+      "name": "Save Cancellation to Airtable",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2000, 580],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "airtable-auth",
+          "name": "Airtable API Key"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Webhook Trigger": {
+      "main": [
+        [
+          { "node": "Normalize Input", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Normalize Input": {
+      "main": [
+        [
+          { "node": "Validate Input", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Validate Input": {
+      "main": [
+        [
+          { "node": "Load Conversation Memory", "type": "main", "index": 0 },
+          { "node": "Load Business Config", "type": "main", "index": 0 }
+        ],
+        [
+          { "node": "Empty Message Response", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Load Conversation Memory": {
+      "main": [
+        [
+          { "node": "Merge Context", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Load Business Config": {
+      "main": [
+        [
+          { "node": "Merge Context", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Merge Context": {
+      "main": [
+        [
+          { "node": "AI Brain - OpenAI", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "AI Brain - OpenAI": {
+      "main": [
+        [
+          { "node": "Parse & Classify Response", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Parse & Classify Response": {
+      "main": [
+        [
+          { "node": "State Router", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "State Router": {
+      "main": [
+        [
+          { "node": "Save Booking to Airtable", "type": "main", "index": 0 }
+        ],
+        [
+          { "node": "Save Emergency to Airtable", "type": "main", "index": 0 }
+        ],
+        [
+          { "node": "Save Complaint to Airtable", "type": "main", "index": 0 }
+        ],
+        [
+          { "node": "Save Cancellation to Airtable", "type": "main", "index": 0 }
+        ],
+        [
+          { "node": "Output Router", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Save Booking to Airtable": {
+      "main": [
+        [
+          { "node": "Output Router", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Save Emergency to Airtable": {
+      "main": [
+        [
+          { "node": "Output Router", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Save Complaint to Airtable": {
+      "main": [
+        [
+          { "node": "Output Router", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Save Cancellation to Airtable": {
+      "main": [
+        [
+          { "node": "Output Router", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Output Router": {
+      "main": [
+        [
+          { "node": "Voice TwiML Response", "type": "main", "index": 0 }
+        ],
+        [
+          { "node": "SMS/WhatsApp JSON Response", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Voice TwiML Response": {
+      "main": [
+        [
+          { "node": "Save Conversation", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "SMS/WhatsApp JSON Response": {
+      "main": [
+        [
+          { "node": "Save Conversation", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Save Conversation": {
+      "main": [
+        [
+          { "node": "Analytics - Post Intelligence", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Analytics - Post Intelligence": {
+      "main": [
+        [
+          { "node": "Save Analytics", "type": "main", "index": 0 }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [
+    { "name": "ai-receptionist" },
+    { "name": "production" }
+  ],
+  "triggerCount": 1,
+  "updatedAt": "2025-01-01T00:00:00.000Z",
+  "versionId": "1"
+}

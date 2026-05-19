@@ -12,7 +12,7 @@ const { handleTransferToHuman } = require('./tools/transferToHuman');
 const { handleSaveLeadIntent } = require('./tools/saveLeadIntent');
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const OPENAI_REALTIME_URL = 'wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17';
+const OPENAI_REALTIME_URL = 'wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2025-06-03';
 
 const TOOL_HANDLERS = {
   check_calendar: handleCheckCalendar,

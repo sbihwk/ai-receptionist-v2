@@ -1,4 +1,5 @@
 const WebSocket = require('ws');
+const audioop = require('audioop'); // built-in Node.js module for audio conversion
 require('dotenv').config();
 const callManager = require('./callManager');
 const businessConfig = require('./businessConfig');
@@ -297,14 +298,19 @@ ENDING EVERY CALL:
 function ulawToGeminiPCM(ulawB64) {
   const ulawBuf = Buffer.from(ulawB64, 'base64');
   // µ-law → PCM16 8kHz
+  const pcm8k = audioop.ulaw2lin(ulawBuf, 2);
   // 8kHz → 16kHz (Gemini input sample rate)
+  const [pcm16k] = audioop.ratecv(pcm8k, 2, 1, 8000, 16000, null);
   return pcm16k.toString('base64');
 }
 
 function geminiPCMToUlaw(pcm24kB64) {
   const pcmBuf = Buffer.from(pcm24kB64, 'base64');
   // 24kHz → 16kHz → 8kHz (two-step for quality)
+  const [pcm16k] = audioop.ratecv(pcmBuf, 2, 1, 24000, 16000, null);
+  const [pcm8k] = audioop.ratecv(pcm16k, 2, 1, 16000, 8000, null);
   // PCM16 → µ-law
+  const ulaw = audioop.lin2ulaw(pcm8k, 2);
   return ulaw.toString('base64');
 }
 

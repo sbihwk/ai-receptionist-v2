@@ -398,17 +398,18 @@ function handleMediaStream(twilioWs, req) {
       // Step 1: Send setup config as first message
       const setupMessage = {
         setup: {
-          generationConfig: {
-            responseModalities: ['AUDIO'],
-            speechConfig: {
-              voiceConfig: {
-                prebuiltVoiceConfig: {
-                  voiceName: 'Aoede' // Natural female voice, good for receptionist
+          model: `models/${GEMINI_MODEL}`,
+          generation_config: {
+            response_modalities: ['AUDIO'],
+            speech_config: {
+              voice_config: {
+                prebuiltvoice_config: {
+                  voice_name: 'Aoede' // Natural female voice, good for receptionist
                 }
               }
             }
           },
-          systemInstruction: {
+          system_instruction: {
             parts: [{ text: buildSystemPrompt() }]
           },
           tools: GEMINI_TOOLS
@@ -607,3 +608,5 @@ module.exports = { handleMediaStream };
 
 
  
+
+

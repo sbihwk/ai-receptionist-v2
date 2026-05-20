@@ -1,4 +1,5 @@
 const WebSocket = require('ws');
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 require('dotenv').config();
 const callManager = require('./callManager');
 const businessConfig = require('./businessConfig');

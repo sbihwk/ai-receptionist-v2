@@ -397,7 +397,6 @@ function handleMediaStream(twilioWs, req) {
       // Step 1: Send setup config as first message
       const setupMessage = {
         setup: {
-          model: `models/${GEMINI_MODEL}`,
           generationConfig: {
             responseModalities: ['AUDIO'],
             speechConfig: {
@@ -604,3 +603,4 @@ function handleMediaStream(twilioWs, req) {
 }
 
 module.exports = { handleMediaStream };
+

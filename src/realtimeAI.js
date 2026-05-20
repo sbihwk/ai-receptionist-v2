@@ -12,7 +12,7 @@ const { handleTransferToHuman } = require('./tools/transferToHuman');
 const { handleSaveLeadIntent } = require('./tools/saveLeadIntent');
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const GEMINI_MODEL = 'gemini-2.0-flash-live-001';
+const GEMINI_MODEL = 'gemini-2.5-flash-native-audio-preview-09-2025';
 const GEMINI_WS_URL = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${GEMINI_API_KEY}`;
 
 const TOOL_HANDLERS = {

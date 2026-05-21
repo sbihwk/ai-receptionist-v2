@@ -353,7 +353,7 @@ function handleMediaStream(ws, req) {
         setTimeout(() => { if (ws.readyState === WebSocket.OPEN) connectToGemini(); }, 2000);
       }
     });
-    geminiWs.on('error'), (err) => console.error('[realtimeAI:geminiWsError]', err.message));
+    geminiWs.on('error', (err) => console.error('[realtimeAI:geminiWsError]', err.message));
   }
 
   async function executeTool(fc) {

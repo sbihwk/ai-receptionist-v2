@@ -232,7 +232,7 @@ function handleMediaStream(ws, req) {
         callSid = msg.start.callSid || msg.start.customParameters?.callSid;
         callerPhone = msg.start.customParameters?.callerPhone || msg.start.from || 'unknown';
         console.log(`[realtimeAI] Stream started — SID: ${streamSid}, Call: ${callSid}, From: ${callerPhone}`);
-        callManager.createCall(callSid, { streamSid, callerPhone, startTime: new Date().toISOString() });
+        callManager.initCall(callSid, { streamSid, callerPhone, startTime: new Date().toISOString() });
         connectToGemini();
       }
 

@@ -207,7 +207,7 @@ RULES:
 - Never say you are an AI or robot
 - Be warm, helpful, and efficient like a great human receptionist
 
-Start by greeting the caller warmly.`;
+Start by greeting the caller warmly. IMPORTANT: Never show your thinking process or internal notes. Speak directly and naturally.`;
 }
 
 // ============================================================
@@ -400,4 +400,5 @@ function handleMediaStream(ws, req) {
 }
 
 module.exports = { handleMediaStream };
+
 

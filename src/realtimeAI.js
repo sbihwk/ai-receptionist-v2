@@ -348,10 +348,12 @@ function handleMediaStream(ws, req) {
     });
 
     geminiWs.on('close', (code, reason) => {
-      console.log(`[realtimeAI] Gemini closed — code: ${code}, reason: ${reason?.toString()} — Call: ${callSid}`);
+      console.log(`[realtimeAI] Gemini closed — code: ${code}, reason: ${reason?.toString()} — Call: ${callSid}`);      if (code === 1011 || code === 1012 || code === 1013) {
+        console.log('[realtimeAI] Gemini unavailable, reconnecting in 2s...');
+        setTimeout(() => { if (ws.readyState === WebSocket.OPEN) connectToGemini(); }, 2000);
+      }
     });
-
-    geminiWs.on('error', (err) => console.error('[realtimeAI:geminiWsError]', err.message));
+    geminiWs.on('error'), (err) => console.error('[realtimeAI:geminiWsError]', err.message));
   }
 
   async function executeTool(fc) {
@@ -398,3 +400,4 @@ function handleMediaStream(ws, req) {
 }
 
 module.exports = { handleMediaStream };
+

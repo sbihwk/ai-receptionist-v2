@@ -44,7 +44,7 @@ async function handleIncomingCall(req, res) {
     // Return TwiML
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Connect>
+  <Say voice="Polly.Aditi">Thank you for calling. Please hold for just a moment.</Say><Connect>
     <Stream url="${streamUrl}">
       <Parameter name="callSid" value="${CallSid}" />
       <Parameter name="from" value="${From}" />
@@ -156,3 +156,4 @@ module.exports = {
   handleIncomingCall,
   handleCallStatus
 };
+

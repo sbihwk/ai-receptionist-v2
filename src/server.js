@@ -1,4 +1,4 @@
-﻿require('dotenv').config();
+require('dotenv').config();
 const express = require('express');
 const http = require('http');
 const { WebSocketServer } = require('ws');
@@ -66,7 +66,7 @@ function extractName(text) {
 // --- Routes ---
 
 // Twilio incoming call webhook
-app.post('/incoming-call', twilioHandler.handleIncomingCall);
+app.post('/incoming-call', twilioHandler.validateTwilioSignature, twilioHandler.handleIncomingCall);
 
 // Twilio call status webhook
 app.post('/call-status', twilioHandler.handleCallStatus);
@@ -75,7 +75,7 @@ app.post('/call-status', twilioHandler.handleCallStatus);
 app.post('/sms-incoming', async (req, res) => {
   try {
     const { From, Body, MessageSid } = req.body;
-    console.log(`[server] Inbound SMS â€” From: ${From}, Body: ${Body}`);
+    console.log(`[server] Inbound SMS — From: ${From}, Body: ${Body}`);
 
     // Save to Airtable
     try {
@@ -185,7 +185,7 @@ app.post('/widget-chat', async (req, res) => {
       console.error('[server:widget-chat] Airtable save failed:', atErr.message);
     }
 
-    // Determine name and phone â€” prefer explicit, then extract from message, then from session history
+    // Determine name and phone — prefer explicit, then extract from message, then from session history
     let detectedName = userName || extractName(message) || extractName(session.history);
     let detectedPhone = userPhone || extractPhone(message) || extractPhone(session.history);
 
@@ -220,7 +220,7 @@ app.post('/widget-chat', async (req, res) => {
 function buildWidgetSystemPrompt() {
   return `You are Alex, the friendly virtual assistant for ${businessConfig.name}. You're chatting with a website visitor.
 
-Keep responses concise â€” 2-3 sentences max. Be warm, professional, and helpful.
+Keep responses concise — 2-3 sentences max. Be warm, professional, and helpful.
 
 BUSINESS INFO:
 Name: ${businessConfig.name}
@@ -234,10 +234,10 @@ Maintenance Plan: $199/year
 YOUR GOALS:
 1. Answer questions helpfully
 2. Collect: name, phone, service needed, address, urgency
-3. Encourage booking â€” mention you can schedule right away
+3. Encourage booking — mention you can schedule right away
 4. For emergencies, tell them to call ${businessConfig.phone} immediately
-5. Never quote exact repair prices â€” dispatch fee only
-6. Never say you're an AI â€” say "I'm Alex, a virtual assistant for ${businessConfig.name}"
+5. Never quote exact repair prices — dispatch fee only
+6. Never say you're an AI — say "I'm Alex, a virtual assistant for ${businessConfig.name}"
 
 If they provide enough info to book (name, phone, address, service type):
 "I've got your info! Our team will call you shortly to confirm your appointment. You can also call us directly at ${businessConfig.phone}."`;
@@ -343,6 +343,7 @@ process.on('unhandledRejection', (reason, promise) => {
 });
 
 module.exports = { app, server };
+
 
 
 

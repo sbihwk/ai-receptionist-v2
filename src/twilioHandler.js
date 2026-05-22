@@ -4,6 +4,19 @@ const airtableService = require('./airtableService');
 const emailService = require('./emailService');
 const businessConfig = require('./businessConfig');
 
+function validateTwilioSignature(req, res, next) {
+  const twilio = require('twilio');
+  const authToken = process.env.TWILIO_AUTH_TOKEN;
+  const signature = req.headers['x-twilio-signature'] || '';
+  const url = process.env.SERVER_URL + '/incoming-call';
+  const valid = twilio.validateRequest(authToken, signature, url, req.body);
+  if (!valid) {
+    console.warn('[twilioHandler] Invalid Twilio signature - rejected');
+    return res.status(403).send('Forbidden');
+  }
+  next();
+}
+
 async function handleIncomingCall(req, res) {
   try {
     const { CallSid, From, To } = req.body;
@@ -154,6 +167,9 @@ function detectClassification(call) {
 
 module.exports = {
   handleIncomingCall,
-  handleCallStatus
+  handleCallStatus,
+    validateTwilioSignature
 };
+
+
 

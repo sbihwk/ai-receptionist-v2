@@ -19,9 +19,9 @@ async function processReviewRequests() {
 
     for (const lead of leads) {
       const fields = lead.fields;
-      const phone = fields.Phone;
-      const name = fields.FullName || 'there';
-      const serviceType = fields.ServiceType || 'service';
+      const phone = phone;
+      const name = customer_name || 'there';
+      const serviceType = service_type || 'service';
 
       if (!phone) continue;
 

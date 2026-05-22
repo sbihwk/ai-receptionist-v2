@@ -1,4 +1,4 @@
-ï»¿const WebSocket = require('ws');
+const WebSocket = require('ws');
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 require('dotenv').config();
 const callManager = require('./callManager');
@@ -95,7 +95,10 @@ const GEMINI_TOOLS = [{
 }];
 
 function buildSystemPrompt() {
-  return `You are Alex, a friendly professional AI receptionist for ${businessConfig.name}. Business hours: ${businessConfig.hours}. Service areas: ${businessConfig.serviceAreas}. Always call check_calendar before offering slots. Never say you are an AI. Keep responses short. Do not output thinking, asterisks, or markdown.`;
+  const agentName = process.env.AGENT_NAME || "Alex";
+  const services = process.env.SERVICES || "general services";
+  const faq = process.env.BUSINESS_FAQ || "";
+  return `You are ${agentName}, a warm professional receptionist for ${businessConfig.name}. You answer calls and book appointments. Business: ${businessConfig.name} | Hours: ${businessConfig.hours} | Areas: ${businessConfig.serviceAreas} | Services: ${services}. ${faq ? "FAQ: " + faq : ""} INSTRUCTIONS: 1. Greet warmly. 2. Answer service questions from details above. 3. If unsure say: Let me have our team follow up. 4. To book: collect name, phone, address, service. 5. Always call check_calendar before offering slots. 6. Confirm details before saving. 7. If upset: say I completely understand. 8. If wants human: call transfer_to_human. STYLE: Max 2 sentences. Sound human. Never say you are AI. No markdown. Hinglish is fine.`;
 }
 
 function handleMediaStream(ws, req) {
@@ -110,7 +113,7 @@ function handleMediaStream(ws, req) {
         streamSid = msg.start.streamSid;
         callSid = msg.start.callSid || msg.start.customParameters?.callSid;
         callerPhone = msg.start.customParameters?.callerPhone || msg.start.from || 'unknown';
-        console.log(`[realtimeAI] Stream started â€” SID: ${streamSid}, Call: ${callSid}`);
+        console.log(`[realtimeAI] Stream started — SID: ${streamSid}, Call: ${callSid}`);
         callManager.initCall(callSid, { streamSid, callerPhone, startTime: new Date().toISOString() });
         connectToGemini();
       }
@@ -126,15 +129,15 @@ function handleMediaStream(ws, req) {
     } catch (err) { console.error('[realtimeAI:twilioMessage]', err.message); }
   });
 
-  ws.on('close', () => { console.log(`[realtimeAI] Twilio closed â€” Call: ${callSid}`); cleanup(); });
+  ws.on('close', () => { console.log(`[realtimeAI] Twilio closed — Call: ${callSid}`); cleanup(); });
   ws.on('error', (err) => console.error('[realtimeAI:twilioWsError]', err.message));
 
   function connectToGemini() {
-    console.log(`[realtimeAI] Connecting to Gemini â€” Call: ${callSid}`);
+    console.log(`[realtimeAI] Connecting to Gemini — Call: ${callSid}`);
     geminiWs = new WebSocket(GEMINI_WS_URL);
 
     geminiWs.on('open', () => {
-      console.log(`[realtimeAI] Gemini open â€” Call: ${callSid}`);
+      console.log(`[realtimeAI] Gemini open — Call: ${callSid}`);
       geminiWs.send(JSON.stringify({ setup: { model: `models/${GEMINI_MODEL}`, generation_config: { response_modalities: ['AUDIO'], speech_config: { voice_config: { prebuilt_voice_config: { voice_name: process.env.AGENT_VOICE || 'Aoede' } } } }, system_instruction: { parts: [{ text: buildSystemPrompt() }] }, tools: GEMINI_TOOLS } }));
     });
 
@@ -142,7 +145,7 @@ function handleMediaStream(ws, req) {
       try {
         const event = JSON.parse(data.toString());
         if (event.setupComplete !== undefined) {
-          console.log(`[realtimeAI] Gemini setup complete â€” Call: ${callSid}`);
+          console.log(`[realtimeAI] Gemini setup complete — Call: ${callSid}`);
           isGeminiReady = true;
           for (const chunk of audioBuffer) {
             if (geminiWs.readyState === WebSocket.OPEN) geminiWs.send(JSON.stringify({ realtime_input: { media_chunks: [{ mime_type: 'audio/pcm;rate=16000', data: chunk }] } }));
@@ -164,7 +167,7 @@ function handleMediaStream(ws, req) {
     });
 
     geminiWs.on('close', (code, reason) => {
-      console.log(`[realtimeAI] Gemini closed â€” code: ${code} â€” Call: ${callSid}`);
+      console.log(`[realtimeAI] Gemini closed — code: ${code} — Call: ${callSid}`);
       if ((code === 1011 || code === 1012 || code === 1013) && ws.readyState === WebSocket.OPEN) {
         console.log('[realtimeAI] Reconnecting in 2s...');
         setTimeout(() => { if (ws.readyState === WebSocket.OPEN) connectToGemini(); }, 2000);
@@ -177,7 +180,7 @@ function handleMediaStream(ws, req) {
     const toolName = fc.name, callId = fc.id;
     let args = {};
     try { args = typeof fc.args === 'string' ? JSON.parse(fc.args) : (fc.args || {}); } catch (e) { args = fc.args || {}; }
-    console.log(`[realtimeAI] Tool: ${toolName} â€” Call: ${callSid}`);
+    console.log(`[realtimeAI] Tool: ${toolName} — Call: ${callSid}`);
     let result = { success: false, message: 'Tool not found' };
     try { const handler = TOOL_HANDLERS[toolName]; if (handler) result = await handler(args, callSid, callerPhone); }
     catch (err) { console.error(`[realtimeAI:tool:${toolName}]`, err.message); result = { success: false, error: err.message }; }
@@ -198,3 +201,4 @@ function handleMediaStream(ws, req) {
 }
 
 module.exports = { handleMediaStream };
+

@@ -1,3 +1,4 @@
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 const { google } = require('googleapis');
 require('dotenv').config();
 
@@ -365,3 +366,4 @@ module.exports = {
   markReminderSent, getTodayStats, getLeadsNeedingReview,
   getLeadsNeedingFollowUp30, findBookingByPhone
 };
+

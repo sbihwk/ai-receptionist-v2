@@ -239,9 +239,16 @@ function handleMediaStream(ws, req) {
 
   function cleanup() {
     if (geminiWs && geminiWs.readyState === WebSocket.OPEN) geminiWs.close();
-    if (callSid) callManager.endCall(callSid);
+    if (callSid) {
+      const callData = callManager.endCall(callSid);
+      if (callData) {
+        const transcript = callManager.getTranscriptText(callSid);
+        require('./airtableService').saveConversation(callSid, transcript, 'Call ended').catch(e => console.error('[realtimeAI:saveTranscript]', e.message));
+      }
+    }
   }
 }
 
 module.exports = { handleMediaStream };
+
 

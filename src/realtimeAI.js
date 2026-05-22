@@ -193,7 +193,7 @@ function handleMediaStream(ws, req) {
             }
           }
           audioBuffer = [];
-          const greeting = '[Call started. Greet the caller warmly as ' + (process.env.AGENT_NAME || 'Alex') + ' from ' + (businessConfig.name || 'our company') + '. One short natural sentence only.]';
+          const greeting = ('[Call started. Caller phone: ' + callerPhone + '. First call lookup_customer with this phone number to check if returning customer. If returning: greet them by name warmly. If new: greet warmly as ' + (process.env.AGENT_NAME || 'Alex') + ' from ' + (businessConfig.name || 'our company') + '. One sentence only.]');
           geminiWs.send(JSON.stringify({ client_content: { turns: [{ role: 'user', parts: [{ text: greeting }] }], turn_complete: true } }));
         }
         if (event.serverContent && event.serverContent.modelTurn && event.serverContent.modelTurn.parts) {
@@ -244,3 +244,4 @@ function handleMediaStream(ws, req) {
 }
 
 module.exports = { handleMediaStream };
+

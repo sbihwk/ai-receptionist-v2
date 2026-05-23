@@ -53,6 +53,7 @@ function endCall(callSid) {
   const call = activeCalls.get(callSid);
   if (!call) return null;
   call.endTime = new Date().toISOString();
+  activeCalls.delete(callSid);
   return call;
 }
 
@@ -89,3 +90,4 @@ module.exports = {
   getActiveCallCount,
   getTranscriptText
 };
+
